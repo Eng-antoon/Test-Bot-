@@ -1,6 +1,7 @@
 # db.py
 import sqlite3
 import json
+from datetime import datetime
 from config import DATABASE
 
 def get_connection():
@@ -70,7 +71,8 @@ def get_all_subscriptions():
     return subs
 
 def add_ticket(order_id, issue_description, issue_type, client, image_url, status, da_id):
-    logs = json.dumps([{"action": "ticket_created", "by": da_id}])
+    # Log ticket creation with initial details.
+    logs = json.dumps([{"action": "ticket_created", "by": da_id, "timestamp": datetime.now().isoformat()}])
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
@@ -100,6 +102,8 @@ def get_all_tickets():
     return tickets
 
 def update_ticket_status(ticket_id, new_status, log_entry):
+    # Add a timestamp to every log entry for better tracking.
+    log_entry['timestamp'] = datetime.now().isoformat()
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT logs FROM tickets WHERE ticket_id=?", (ticket_id,))
@@ -108,7 +112,7 @@ def update_ticket_status(ticket_id, new_status, log_entry):
     if row and row["logs"]:
         logs = json.loads(row["logs"])
     logs.append(log_entry)
-    logs_str = json.dumps(logs)
+    logs_str = json.dumps(logs, ensure_ascii=False)
     c.execute("UPDATE tickets SET status=?, logs=? WHERE ticket_id=?", (new_status, logs_str, ticket_id))
     conn.commit()
     conn.close()
@@ -126,7 +130,7 @@ def get_all_open_tickets():
     c = conn.cursor()
     c.execute("""
         SELECT * FROM tickets 
-        WHERE status IN ('Opened', 'Pending DA Response', 'Awaiting Client Response', 'Awaiting Supervisor Approval', 'Client Responded', 'Client Ignored')
+        WHERE status IN ('Opened', 'Pending DA Action', 'Awaiting Client Response', 'Awaiting Supervisor Approval', 'Client Responded', 'Client Ignored')
     """)
     tickets = c.fetchall()
     conn.close()

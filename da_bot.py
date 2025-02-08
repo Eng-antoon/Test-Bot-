@@ -102,7 +102,7 @@ def finalize_ticket(update: Update, context: CallbackContext, image_url):
     issue_type = data.get('issue_type')
     client_selected = data.get('client', 'غير محدد')
     ticket_id = db.add_ticket(order_id, description, issue_type, client_selected, image_url, "Opened", user.id)
-    update.message.reply_text(f"تم إنشاء التذكرة برقم {ticket_id}.")
+    update.message.reply_text(f"تم إنشاء التذكرة برقم {ticket_id}.\nالحالة: Opened")
     notify_supervisors(ticket_id, user)
     context.user_data.clear()
     reply_markup = ReplyKeyboardMarkup(MAIN_MENU_OPTIONS, resize_keyboard=True)
@@ -112,18 +112,21 @@ def finalize_ticket(update: Update, context: CallbackContext, image_url):
 def notify_supervisors(ticket_id, da_user):
     ticket = db.get_ticket(ticket_id)
     supervisors = db.get_supervisors()
-    message = (f"تذكرة جديدة من {da_user.first_name} (ID: {da_user.id})\n"
-               f"رقم الطلب: {ticket['order_id']}\nالعميل: {ticket['client']}\nالحالة: {ticket['status']}")
+    message = (
+        f"<b>تذكرة جديدة من {da_user.first_name} (ID: {da_user.id})</b>\n"
+        f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+        f"<b>العميل:</b> {ticket['client']}\n"
+        f"<b>الحالة:</b> {ticket['status']}"
+    )
     keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view_{ticket_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     bot = Bot(token=config.SUPERVISOR_BOT_TOKEN)
     for sup in supervisors:
         try:
-            bot.send_message(chat_id=sup['chat_id'], text=message, reply_markup=reply_markup)
+            bot.send_message(chat_id=sup['chat_id'], text=message, reply_markup=reply_markup, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error notifying supervisor {sup['chat_id']}: {e}")
 
-# Handler for callbacks directed to the DA (from Supervisor)
 def da_callback_handler(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
@@ -135,27 +138,56 @@ def da_callback_handler(update: Update, context: CallbackContext):
         bot_sup = Bot(token=config.SUPERVISOR_BOT_TOKEN)
         for sup in db.get_supervisors():
             try:
-                bot_sup.send_message(chat_id=sup['chat_id'], text=f"التذكرة #{ticket_id} تم إغلاقها من قبل الوكيل.")
+                bot_sup.send_message(chat_id=sup['chat_id'],
+                                     text=f"التذكرة #{ticket_id} تم إغلاقها من قبل الوكيل.",
+                                     parse_mode="HTML")
             except Exception as e:
                 logger.error(f"Error notifying supervisor of closure: {e}")
+        return MAIN_MENU
     elif data.startswith("da_moreinfo_"):
-        ticket_id = int(data.split("_")[2])
+        ticket_id = int(data.split("_")[1])
         context.user_data['ticket_id'] = ticket_id
-        # Instead of editing the inline message with ForceReply, send a new message.
-        context.bot.send_message(chat_id=query.message.chat_id, text="أدخل المعلومات الإضافية المطلوبة:", reply_markup=ForceReply(selective=True))
+        ticket = db.get_ticket(ticket_id)
+        text = (
+            f"<b>التذكرة #{ticket_id}</b>\n"
+            f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+            f"<b>الوصف:</b> {ticket['issue_description']}\n"
+            f"<b>الحالة الحالية:</b> {ticket['status']}\n\n"
+            "يرجى إدخال المعلومات الإضافية المطلوبة للتذكرة:"
+        )
+        context.bot.send_message(chat_id=query.message.chat_id,
+                                 text=text,
+                                 reply_markup=ForceReply(selective=True),
+                                 parse_mode="HTML")
         return AWAITING_DA_RESPONSE
     else:
         query.edit_message_text(text="الإجراء غير معروف.")
+        return MAIN_MENU
 
 def da_awaiting_response_handler(update: Update, context: CallbackContext):
     additional_info = update.message.text.strip()
     ticket_id = context.user_data.get('ticket_id')
+    if not ticket_id:
+        update.message.reply_text("حدث خطأ. الرجاء إعادة المحاولة.")
+        return MAIN_MENU
     db.update_ticket_status(ticket_id, "Additional Info Provided", {"action": "da_moreinfo", "message": additional_info})
+    ticket = db.get_ticket(ticket_id)
+    text = (
+        f"<b>تحديث جديد على التذكرة #{ticket_id}</b>\n"
+        f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+        f"<b>الوصف:</b> {ticket['issue_description']}\n"
+        f"<b>نوع المشكلة:</b> {ticket['issue_type']}\n"
+        f"<b>الحالة:</b> {ticket['status']}\n\n"
+        f"<b>معلومات إضافية من الوكيل:</b>\n{additional_info}\n\n"
+        "يمكن للمشرف الآن عرض التفاصيل واتخاذ الإجراء المناسب."
+    )
+    keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view_{ticket_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     update.message.reply_text("تم إرسال المعلومات الإضافية إلى المشرف.")
     bot_sup = Bot(token=config.SUPERVISOR_BOT_TOKEN)
     for sup in db.get_supervisors():
         try:
-            bot_sup.send_message(chat_id=sup['chat_id'], text=f"تم إرسال معلومات إضافية للتذكرة #{ticket_id}:\n{additional_info}")
+            bot_sup.send_message(chat_id=sup['chat_id'], text=text, reply_markup=reply_markup, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error notifying supervisors: {e}")
     context.user_data.pop('ticket_id', None)
@@ -168,7 +200,10 @@ def main():
         entry_points=[CommandHandler('start', start)],
         states={
             SUBSCRIPTION_PHONE: [MessageHandler(Filters.text & ~Filters.command, subscription_phone)],
-            MAIN_MENU: [MessageHandler(Filters.text & ~Filters.command, main_menu)],
+            MAIN_MENU: [
+                MessageHandler(Filters.text & ~Filters.command, main_menu),
+                CallbackQueryHandler(da_callback_handler, pattern="^(close_|da_moreinfo_).*")
+            ],
             NEW_ISSUE_CLIENT: [MessageHandler(Filters.text & ~Filters.command, new_issue_client)],
             NEW_ISSUE_ORDER: [MessageHandler(Filters.text & ~Filters.command, new_issue_order)],
             NEW_ISSUE_DESCRIPTION: [MessageHandler(Filters.text & ~Filters.command, new_issue_description)],
@@ -180,7 +215,6 @@ def main():
         fallbacks=[CommandHandler('cancel', lambda u, c: u.message.reply_text("تم إلغاء العملية."))]
     )
     dp.add_handler(conv_handler)
-    dp.add_handler(CallbackQueryHandler(da_callback_handler, pattern="^(close_|da_moreinfo_).*"))
     updater.start_polling()
     updater.idle()
 

@@ -1,10 +1,10 @@
 # supervisor_bot.py
 import logging
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Bot
-from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
-                          CallbackQueryHandler, ConversationHandler, CallbackContext)
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler, ConversationHandler, CallbackContext
 import db
 import config
+import json
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +28,8 @@ def start(update: Update, context: CallbackContext):
 def subscription_phone(update: Update, context: CallbackContext):
     phone = update.message.text.strip()
     user = update.effective_user
-    db.add_subscription(user.id, phone, 'Supervisor', "Supervisor", None, user.username, user.first_name, user.last_name, update.effective_chat.id)
+    db.add_subscription(user.id, phone, 'Supervisor', "Supervisor", None,
+                        user.username, user.first_name, user.last_name, update.effective_chat.id)
     context.user_data['awaiting_response'] = False
     reply_markup = ReplyKeyboardMarkup(MAIN_MENU_OPTIONS, resize_keyboard=True)
     update.message.reply_text("تم الاشتراك بنجاح كـ Supervisor!", reply_markup=reply_markup)
@@ -40,11 +41,17 @@ def main_menu_handler(update: Update, context: CallbackContext):
         tickets = db.get_all_open_tickets()
         if tickets:
             for ticket in tickets:
-                message_text = (f"تذكرة #{ticket['ticket_id']}\nOrder: {ticket['order_id']}\n"
-                                f"العميل: {ticket['client']}\nالحالة: {ticket['status']}")
+                message_text = (
+                    f"<b>تذكرة #{ticket['ticket_id']}</b>\n"
+                    f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+                    f"<b>العميل:</b> {ticket['client']}\n"
+                    f"<b>الوصف:</b> {ticket['issue_description']}\n"
+                    f"<b>نوع المشكلة:</b> {ticket['issue_type']}\n"
+                    f"<b>الحالة:</b> {ticket['status']}"
+                )
                 keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view_{ticket['ticket_id']}")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                update.message.reply_text(message_text, reply_markup=reply_markup)
+                update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode="HTML")
         else:
             update.message.reply_text("لا توجد تذاكر مفتوحة حالياً.")
         reply_markup = ReplyKeyboardMarkup(MAIN_MENU_OPTIONS, resize_keyboard=True)
@@ -62,11 +69,17 @@ def search_tickets(update: Update, context: CallbackContext):
     tickets = db.search_tickets_by_order(query_text)
     if tickets:
         for ticket in tickets:
-            message_text = (f"تذكرة #{ticket['ticket_id']}\nOrder: {ticket['order_id']}\n"
-                            f"العميل: {ticket['client']}\nالحالة: {ticket['status']}")
+            message_text = (
+                f"<b>تذكرة #{ticket['ticket_id']}</b>\n"
+                f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+                f"<b>العميل:</b> {ticket['client']}\n"
+                f"<b>الوصف:</b> {ticket['issue_description']}\n"
+                f"<b>نوع المشكلة:</b> {ticket['issue_type']}\n"
+                f"<b>الحالة:</b> {ticket['status']}"
+            )
             keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view_{ticket['ticket_id']}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            update.message.reply_text(message_text, reply_markup=reply_markup)
+            update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode="HTML")
     else:
         update.message.reply_text("لم يتم العثور على تذاكر مطابقة.")
     reply_markup = ReplyKeyboardMarkup(MAIN_MENU_OPTIONS, resize_keyboard=True)
@@ -77,39 +90,77 @@ def callback_handler(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
     data = query.data
+
     if data.startswith("view_"):
         ticket_id = int(data.split("_")[1])
         ticket = db.get_ticket(ticket_id)
         if ticket:
-            text = (f"تفاصيل التذكرة #{ticket['ticket_id']}:\nOrder: {ticket['order_id']}\n"
-                    f"الوصف: {ticket['issue_description']}\nنوع المشكلة: {ticket['issue_type']}\n"
-                    f"العميل: {ticket['client']}\nالحالة: {ticket['status']}")
-            if ticket['image_url']:
-                text += "\n[صورة مرفقة]"
+            try:
+                logs = ""
+                if ticket["logs"]:
+                    logs_list = json.loads(ticket["logs"])
+                    logs = "\n".join([f"{entry.get('timestamp', '')}: {entry.get('action', '')} - {entry.get('message', '')}" for entry in logs_list])
+            except Exception:
+                logs = "لا توجد سجلات إضافية."
+            text = (
+                f"<b>تفاصيل التذكرة #{ticket['ticket_id']}</b>\n"
+                f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+                f"<b>العميل:</b> {ticket['client']}\n"
+                f"<b>الوصف:</b> {ticket['issue_description']}\n"
+                f"<b>نوع المشكلة:</b> {ticket['issue_type']}\n"
+                f"<b>الحالة:</b> {ticket['status']}\n\n"
+                f"<b>السجلات:</b>\n{logs}"
+            )
             keyboard = [
                 [InlineKeyboardButton("حل المشكلة", callback_data=f"solve_{ticket_id}")],
                 [InlineKeyboardButton("طلب المزيد من المعلومات", callback_data=f"moreinfo_{ticket_id}")],
                 [InlineKeyboardButton("إرسال إلى العميل", callback_data=f"sendclient_{ticket_id}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            query.edit_message_text(text=text, reply_markup=reply_markup)
+            query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
         else:
             query.edit_message_text(text="التذكرة غير موجودة.")
         return MAIN_MENU
+
     elif data.startswith("solve_"):
         ticket_id = int(data.split("_")[1])
         context.user_data['ticket_id'] = ticket_id
         context.user_data['action'] = 'solve'
         context.user_data['awaiting_response'] = True
-        context.bot.send_message(chat_id=query.message.chat_id, text="أدخل رسالة الحل للمشكلة:", reply_markup=ForceReply(selective=True))
+        context.bot.send_message(chat_id=query.message.chat_id,
+                                 text="أدخل رسالة الحل للمشكلة:",
+                                 reply_markup=ForceReply(selective=True))
         return AWAITING_RESPONSE
+
     elif data.startswith("moreinfo_"):
+        # Supervisor requests more info from the DA.
         ticket_id = int(data.split("_")[1])
-        context.user_data['ticket_id'] = ticket_id
-        context.user_data['action'] = 'moreinfo'
-        context.user_data['awaiting_response'] = True
-        context.bot.send_message(chat_id=query.message.chat_id, text="أدخل تفاصيل الطلب أو الاستفسار:", reply_markup=ForceReply(selective=True))
-        return AWAITING_RESPONSE
+        ticket = db.get_ticket(ticket_id)
+        if not ticket:
+            query.edit_message_text(text="التذكرة غير موجودة.")
+            return MAIN_MENU
+        text = (
+            f"<b>طلب معلومات إضافية للتذكرة #{ticket_id}</b>\n"
+            "تم إرسال طلب للمزيد من المعلومات إلى الوكيل."
+        )
+        query.edit_message_text(text=text, parse_mode="HTML")
+        # Now notify the DA with a prompt to apply additional info.
+        text_da = (
+            f"<b>طلب معلومات إضافية من المشرف للتذكرة #{ticket_id}</b>\n"
+            f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+            f"<b>الوصف:</b> {ticket['issue_description']}\n\n"
+            "يرجى إدخال المعلومات الإضافية المطلوبة."
+        )
+        keyboard = [[InlineKeyboardButton("تطبيق المعلومات الإضافية", callback_data=f"da_moreinfo_{ticket_id}")]]
+        reply_markup_da = InlineKeyboardMarkup(keyboard)
+        da_sub = db.get_subscription(ticket['da_id'], "DA")
+        if da_sub:
+            bot_da = Bot(token=config.DA_BOT_TOKEN)
+            bot_da.send_message(chat_id=da_sub['chat_id'], text=text_da, reply_markup=reply_markup_da, parse_mode="HTML")
+        else:
+            query.edit_message_text(text="لم يتم العثور على الوكيل.")
+        return MAIN_MENU
+
     elif data.startswith("sendclient_"):
         ticket_id = int(data.split("_")[1])
         context.user_data['ticket_id'] = ticket_id
@@ -118,9 +169,11 @@ def callback_handler(update: Update, context: CallbackContext):
             query.edit_message_text(text="التذكرة غير موجودة.")
             return MAIN_MENU
         if not ticket['client'] or ticket['client'] == 'غير محدد':
-            keyboard = [[InlineKeyboardButton("بوبا", callback_data=f"setclient_{ticket_id}_بوبا"),
-                         InlineKeyboardButton("بتلكو", callback_data=f"setclient_{ticket_id}_بتلكو"),
-                         InlineKeyboardButton("بيبس", callback_data=f"setclient_{ticket_id}_بيبس")]]
+            keyboard = [[
+                InlineKeyboardButton("بوبا", callback_data=f"setclient_{ticket_id}_بوبا"),
+                InlineKeyboardButton("بتلكو", callback_data=f"setclient_{ticket_id}_بتلكو"),
+                InlineKeyboardButton("بيبس", callback_data=f"setclient_{ticket_id}_بيبس")
+            ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             query.edit_message_text(text="اختر العميل لإرسال التذكرة إليه:", reply_markup=reply_markup)
             return MAIN_MENU
@@ -128,6 +181,7 @@ def callback_handler(update: Update, context: CallbackContext):
             send_to_client(ticket_id)
             query.edit_message_text(text="تم إرسال التذكرة إلى العميل.")
             return MAIN_MENU
+
     elif data.startswith("setclient_"):
         parts = data.split("_")
         ticket_id = int(parts[1])
@@ -136,26 +190,7 @@ def callback_handler(update: Update, context: CallbackContext):
         send_to_client(ticket_id)
         query.edit_message_text(text=f"تم تعيين العميل إلى {client_choice} وإرسال التذكرة للعميل.")
         return MAIN_MENU
-    elif data.startswith("sendto_da_"):
-        ticket_id = int(data.split("_")[2])
-        db.update_ticket_status(ticket_id, "Pending DA Action", {"action": "client_solution_sent"})
-        notify_da(ticket_id, "الحل المقدم من العميل", info_request=False)
-        query.edit_message_text(text="تم إرسال الحل إلى الوكيل.")
-        return MAIN_MENU
-    elif data.startswith("edit_"):
-        ticket_id = int(data.split("_")[1])
-        context.user_data['ticket_id'] = ticket_id
-        context.user_data['action'] = 'edit'
-        context.user_data['awaiting_response'] = True
-        context.bot.send_message(chat_id=query.message.chat_id, text="أدخل النص المحرر للحل:", reply_markup=ForceReply(selective=True))
-        return AWAITING_RESPONSE
-    elif data.startswith("sup_resolve_"):
-        ticket_id = int(data.split("_")[1])
-        context.user_data['ticket_id'] = ticket_id
-        context.user_data['action'] = 'sup_resolve'
-        context.user_data['awaiting_response'] = True
-        context.bot.send_message(chat_id=query.message.chat_id, text="أدخل الحل الذي تريد إرساله من طرفك:", reply_markup=ForceReply(selective=True))
-        return AWAITING_RESPONSE
+
     else:
         query.edit_message_text(text="الإجراء غير معروف.")
         return MAIN_MENU
@@ -175,14 +210,6 @@ def awaiting_response_handler(update: Update, context: CallbackContext):
         db.update_ticket_status(ticket_id, "Pending DA Response", {"action": "request_more_info", "message": response})
         notify_da(ticket_id, response, info_request=True)
         update.message.reply_text("تم إرسال الطلب إلى الوكيل.")
-    elif action == 'edit':
-        db.update_ticket_status(ticket_id, "Pending DA Action", {"action": "edited_resolution", "message": response})
-        notify_da(ticket_id, response, info_request=False)
-        update.message.reply_text("تم إرسال الحل المعدل إلى الوكيل.")
-    elif action == 'sup_resolve':
-        db.update_ticket_status(ticket_id, "Pending DA Action", {"action": "supervisor_resolution", "message": response})
-        notify_da(ticket_id, response, info_request=False)
-        update.message.reply_text("تم إرسال الحل إلى الوكيل.")
     context.user_data.pop('ticket_id', None)
     context.user_data.pop('action', None)
     update.message.reply_text("تم حفظ ردك.", reply_markup=ReplyKeyboardMarkup(MAIN_MENU_OPTIONS, resize_keyboard=True))
@@ -193,16 +220,28 @@ def notify_da(ticket_id, message, info_request=False):
     da_id = ticket['da_id']
     bot = Bot(token=config.DA_BOT_TOKEN)
     if info_request:
-        text = f"طلب معلومات إضافية للتذكرة #{ticket_id}:\n{message}"
-        keyboard = [[InlineKeyboardButton("أضف معلومات", callback_data=f"da_moreinfo_{ticket_id}")]]
+        text = (
+            f"<b>طلب معلومات إضافية للتذكرة #{ticket_id}</b>\n"
+            f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+            f"<b>الوصف:</b> {ticket['issue_description']}\n"
+            f"<b>الحالة:</b> {ticket['status']}\n"
+            f"<b>المعلومات المطلوبة:</b> {message}"
+        )
+        keyboard = [[InlineKeyboardButton("تطبيق المعلومات الإضافية", callback_data=f"da_moreinfo_{ticket_id}")]]
     else:
-        text = f"حل للمشكلة للتذكرة #{ticket_id}:\n{message}"
+        text = (
+            f"<b>حل للمشكلة للتذكرة #{ticket_id}</b>\n"
+            f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+            f"<b>الوصف:</b> {ticket['issue_description']}\n"
+            f"<b>الحالة:</b> {ticket['status']}\n"
+            f"<b>الحل:</b> {message}"
+        )
         keyboard = [[InlineKeyboardButton("إغلاق التذكرة", callback_data=f"close_{ticket_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
         da_sub = db.get_subscription(da_id, "DA")
         if da_sub:
-            bot.send_message(chat_id=da_sub['chat_id'], text=text, reply_markup=reply_markup)
+            bot.send_message(chat_id=da_sub['chat_id'], text=text, reply_markup=reply_markup, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error notifying DA: {e}")
 
@@ -211,17 +250,23 @@ def send_to_client(ticket_id):
     client_name = ticket['client']
     clients = db.get_clients_by_name(client_name)
     bot = Bot(token=config.CLIENT_BOT_TOKEN)
-    message = (f"تذكرة من المشرف:\nTicket #{ticket['ticket_id']}\nOrder: {ticket['order_id']}\n"
-               f"الوصف: {ticket['issue_description']}\nنوع المشكلة: {ticket['issue_type']}")
+    message = (
+        f"<b>تذكرة من المشرف</b>\n"
+        f"<b>تذكرة #{ticket['ticket_id']}</b>\n"
+        f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
+        f"<b>الوصف:</b> {ticket['issue_description']}\n"
+        f"<b>نوع المشكلة:</b> {ticket['issue_type']}\n"
+        f"<b>الحالة:</b> {ticket['status']}"
+    )
     keyboard = [
         [InlineKeyboardButton("حالياً", callback_data=f"notify_pref_{ticket_id}_now")],
         [InlineKeyboardButton("خلال 15 دقيقة", callback_data=f"notify_pref_{ticket_id}_15")],
         [InlineKeyboardButton("خلال 10 دقائق", callback_data=f"notify_pref_{ticket_id}_10")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    for client in db.get_clients_by_name(client_name):
+    for client in clients:
         try:
-            bot.send_message(chat_id=client['chat_id'], text=message, reply_markup=reply_markup)
+            bot.send_message(chat_id=client['chat_id'], text=message, reply_markup=reply_markup, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error notifying client {client['chat_id']}: {e}")
 
@@ -232,14 +277,16 @@ def main():
         entry_points=[CommandHandler('start', start)],
         states={
             SUBSCRIPTION_PHONE: [MessageHandler(Filters.text & ~Filters.command, subscription_phone)],
-            MAIN_MENU: [MessageHandler(Filters.text & ~Filters.command, main_menu_handler)],
+            MAIN_MENU: [
+                MessageHandler(Filters.text & ~Filters.command, main_menu_handler),
+                CallbackQueryHandler(callback_handler, pattern="^(view_|solve_|moreinfo_|sendclient_|setclient_).*")
+            ],
             SEARCH_TICKETS: [MessageHandler(Filters.text & ~Filters.command, search_tickets)],
             AWAITING_RESPONSE: [MessageHandler(Filters.text & ~Filters.command, awaiting_response_handler)]
         },
         fallbacks=[CommandHandler('cancel', lambda u, c: u.message.reply_text("تم إلغاء العملية."))]
     )
     dp.add_handler(conv_handler)
-    dp.add_handler(CallbackQueryHandler(callback_handler))
     updater.start_polling()
     updater.idle()
 
