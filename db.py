@@ -31,6 +31,7 @@ def init_db():
             ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
             order_id TEXT,
             issue_description TEXT,
+            issue_reason TEXT,
             issue_type TEXT,
             client TEXT,
             image_url TEXT,
@@ -70,16 +71,16 @@ def get_all_subscriptions():
     conn.close()
     return subs
 
-def add_ticket(order_id, issue_description, issue_type, client, image_url, status, da_id):
+def add_ticket(order_id, issue_description, issue_reason, issue_type, client, image_url, status, da_id):
     # Log ticket creation with initial details.
     logs = json.dumps([{"action": "ticket_created", "by": da_id, "timestamp": datetime.now().isoformat()}])
     conn = get_connection()
     c = conn.cursor()
     c.execute("""
         INSERT INTO tickets 
-        (order_id, issue_description, issue_type, client, image_url, status, da_id, logs)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (order_id, issue_description, issue_type, client, image_url, status, da_id, logs))
+        (order_id, issue_description, issue_reason, issue_type, client, image_url, status, da_id, logs)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (order_id, issue_description, issue_reason, issue_type, client, image_url, status, da_id, logs))
     ticket_id = c.lastrowid
     conn.commit()
     conn.close()

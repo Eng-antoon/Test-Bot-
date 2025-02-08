@@ -144,8 +144,9 @@ TICKETS_TEMPLATE = COMMON_STYLE + """
   <tr>
     <th>ID</th>
     <th>Order ID</th>
-    <th>Description</th>
-    <th>Type</th>
+    <th>Issue Description</th>
+    <th>سبب المشكلة</th>
+    <th>نوع المشكلة</th>
     <th>Client</th>
     <th>Status</th>
     <th>DA ID</th>
@@ -157,6 +158,7 @@ TICKETS_TEMPLATE = COMMON_STYLE + """
     <td>{{ t['ticket_id'] }}</td>
     <td>{{ t['order_id'] }}</td>
     <td>{{ t['issue_description'] }}</td>
+    <td>{{ t['issue_reason'] }}</td>
     <td>{{ t['issue_type'] }}</td>
     <td>{{ t['client'] }}</td>
     <td>
