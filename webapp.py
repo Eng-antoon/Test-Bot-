@@ -5,11 +5,142 @@ import json
 
 app = Flask(__name__)
 
-TICKETS_TEMPLATE = """
+COMMON_STYLE = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600&display=swap');
+
+* {
+    font-family: 'Open Sans', sans-serif;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background: #f0f2f5;
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+h1 {
+    color: #1a73e8;
+    margin-bottom: 2rem;
+    text-align: center;
+    font-weight: 600;
+    animation: fadeIn 0.8s ease-in;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1.5rem 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    background: white;
+    border-radius: 8px;
+    overflow: hidden;
+    animation: slideUp 0.6s ease-out;
+}
+
+th, td {
+    padding: 15px;
+    text-align: left;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+th {
+    background-color: #1a73e8;
+    color: white;
+    font-weight: 600;
+}
+
+tr:hover {
+    background-color: #f8f9fa;
+    transition: background 0.3s ease;
+}
+
+tr:nth-child(even) {
+    background-color: #f8f9fa;
+}
+
+a {
+    color: #1a73e8;
+    text-decoration: none;
+    transition: color 0.3s ease;
+}
+
+a:hover {
+    color: #1557b0;
+    text-decoration: underline;
+}
+
+.button {
+    display: inline-block;
+    padding: 8px 16px;
+    background: #1a73e8;
+    color: white !important;
+    border-radius: 4px;
+    margin: 0.5rem 0;
+    transition: transform 0.2s ease;
+}
+
+.button:hover {
+    transform: translateY(-2px);
+    text-decoration: none;
+}
+
+pre {
+    background: #f8f9fa;
+    padding: 1rem;
+    border-radius: 8px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    border: 1px solid #e0e0e0;
+    animation: fadeIn 0.8s ease-in;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes slideUp {
+    from { transform: translateY(20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+.status-indicator {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-right: 8px;
+}
+
+.status-open { background-color: #34a853; }
+.status-pending { background-color: #fbbc05; }
+.status-closed { background-color: #ea4335; }
+
+.log-entry {
+    margin: 0.5rem 0;
+    padding: 0.5rem;
+    border-left: 3px solid #1a73e8;
+    background: #f8f9fa;
+    animation: slideIn 0.4s ease-out;
+}
+
+@keyframes slideIn {
+    from { transform: translateX(-20px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+</style>
+"""
+
+TICKETS_TEMPLATE = COMMON_STYLE + """
 <!doctype html>
 <title>Tickets</title>
 <h1>Tickets</h1>
-<table border=1>
+<table>
   <tr>
     <th>ID</th>
     <th>Order ID</th>
@@ -28,21 +159,24 @@ TICKETS_TEMPLATE = """
     <td>{{ t['issue_description'] }}</td>
     <td>{{ t['issue_type'] }}</td>
     <td>{{ t['client'] }}</td>
-    <td>{{ t['status'] }}</td>
+    <td>
+      <span class="status-indicator status-{{ t['status'].lower() }}"></span>
+      {{ t['status'] }}
+    </td>
     <td>{{ t['da_id'] }}</td>
     <td>{{ t['created_at'] }}</td>
-    <td><a href="/ticket/{{ t['ticket_id'] }}/activity">عرض النشاط</a></td>
+    <td><a class="button" href="/ticket/{{ t['ticket_id'] }}/activity">عرض النشاط</a></td>
   </tr>
   {% endfor %}
 </table>
-<a href="/">Back to Home</a>
+<a class="button" href="/">Back to Home</a>
 """
 
-SUBSCRIPTIONS_TEMPLATE = """
+SUBSCRIPTIONS_TEMPLATE = COMMON_STYLE + """
 <!doctype html>
 <title>Subscriptions</title>
 <h1>Subscriptions</h1>
-<table border=1>
+<table>
   <tr>
     <th>User ID</th>
     <th>Role</th>
@@ -57,38 +191,73 @@ SUBSCRIPTIONS_TEMPLATE = """
   {% for u in subs %}
   <tr>
     <td>{{ u['user_id'] }}</td>
-    <td>{{ u['role'] }}</td>
+    <td><span class="role-badge">{{ u['role'] }}</span></td>
     <td>{{ u['bot'] }}</td>
     <td>{{ u['phone'] }}</td>
     <td>{{ u['client'] }}</td>
-    <td>{{ u['username'] }}</td>
+    <td>@{{ u['username'] }}</td>
     <td>{{ u['first_name'] }}</td>
     <td>{{ u['last_name'] }}</td>
     <td>{{ u['chat_id'] }}</td>
   </tr>
   {% endfor %}
 </table>
-<a href="/">Back to Home</a>
+<a class="button" href="/">Back to Home</a>
 """
 
-HOME_TEMPLATE = """
+HOME_TEMPLATE = COMMON_STYLE + """
 <!doctype html>
 <title>Issue Resolution Admin</title>
 <h1>Issue Resolution Admin</h1>
-<ul>
-  <li><a href="/tickets">View All Tickets</a></li>
-  <li><a href="/subscriptions">View Subscriptions</a></li>
-</ul>
+<div class="card-container">
+  <div class="card">
+    <h2>Tickets Management</h2>
+    <a class="button" href="/tickets">View All Tickets</a>
+  </div>
+  <div class="card">
+    <h2>Subscriptions</h2>
+    <a class="button" href="/subscriptions">View Subscriptions</a>
+  </div>
+</div>
+<style>
+.card-container {
+    display: flex;
+    gap: 2rem;
+    justify-content: center;
+    margin-top: 2rem;
+}
+
+.card {
+    background: white;
+    padding: 2rem;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    text-align: center;
+    transition: transform 0.3s ease;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+}
+
+.card h2 {
+    color: #1a73e8;
+    margin-bottom: 1rem;
+    font-size: 1.4rem;
+}
+</style>
 """
 
-ACTIVITY_TEMPLATE = """
+ACTIVITY_TEMPLATE = COMMON_STYLE + """
 <!doctype html>
 <title>Ticket Activity</title>
 <h1>Activity for Ticket #{{ ticket_id }}</h1>
-<pre>
-{{ logs }}
-</pre>
-<a href="/tickets">Back to Tickets</a>
+<div class="activity-container">
+  {% for entry in logs.split('\n') %}
+  <div class="log-entry">{{ entry }}</div>
+  {% endfor %}
+</div>
+<a class="button" href="/tickets">Back to Tickets</a>
 """
 
 @app.route("/")

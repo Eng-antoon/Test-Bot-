@@ -151,3 +151,18 @@ def get_clients_by_name(client_name):
     clients = c.fetchall()
     conn.close()
     return clients
+
+def get_users_by_role(role, client=None):
+    """
+    Helper function for the notifier module (and others) to retrieve users by role.
+    Optionally, filter by client name.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    if client:
+        c.execute("SELECT * FROM subscriptions WHERE role=? AND client=?", (role.capitalize(), client))
+    else:
+        c.execute("SELECT * FROM subscriptions WHERE role=?", (role.capitalize(),))
+    users = c.fetchall()
+    conn.close()
+    return users

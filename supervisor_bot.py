@@ -1,10 +1,10 @@
 # supervisor_bot.py
 import logging
+import json
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Bot
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler, ConversationHandler, CallbackContext
 import db
 import config
-import json
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -113,9 +113,13 @@ def callback_handler(update: Update, context: CallbackContext):
             )
             keyboard = [
                 [InlineKeyboardButton("حل المشكلة", callback_data=f"solve_{ticket_id}")],
+                [InlineKeyboardButton("تحرير الحل", callback_data=f"edit_{ticket_id}")],
                 [InlineKeyboardButton("طلب المزيد من المعلومات", callback_data=f"moreinfo_{ticket_id}")],
                 [InlineKeyboardButton("إرسال إلى العميل", callback_data=f"sendclient_{ticket_id}")]
             ]
+            # If a client solution exists (i.e. status is "Client Responded"), offer the DA forward option
+            if ticket["status"] == "Client Responded":
+                keyboard.insert(0, [InlineKeyboardButton("إرسال للحالة إلى الوكيل", callback_data=f"sendto_da_{ticket_id}")])
             reply_markup = InlineKeyboardMarkup(keyboard)
             query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
         else:
@@ -132,34 +136,37 @@ def callback_handler(update: Update, context: CallbackContext):
                                  reply_markup=ForceReply(selective=True))
         return AWAITING_RESPONSE
 
-    elif data.startswith("moreinfo_"):
-        # Supervisor requests more info from the DA.
+    elif data.startswith("edit_"):
+        # Allow supervisor to edit the client's solution before sending to DA
         ticket_id = int(data.split("_")[1])
         ticket = db.get_ticket(ticket_id)
-        if not ticket:
-            query.edit_message_text(text="التذكرة غير موجودة.")
-            return MAIN_MENU
-        text = (
-            f"<b>طلب معلومات إضافية للتذكرة #{ticket_id}</b>\n"
-            "تم إرسال طلب للمزيد من المعلومات إلى الوكيل."
-        )
-        query.edit_message_text(text=text, parse_mode="HTML")
-        # Now notify the DA with a prompt to apply additional info.
-        text_da = (
-            f"<b>طلب معلومات إضافية من المشرف للتذكرة #{ticket_id}</b>\n"
-            f"<b>رقم الطلب:</b> {ticket['order_id']}\n"
-            f"<b>الوصف:</b> {ticket['issue_description']}\n\n"
-            "يرجى إدخال المعلومات الإضافية المطلوبة."
-        )
-        keyboard = [[InlineKeyboardButton("تطبيق المعلومات الإضافية", callback_data=f"da_moreinfo_{ticket_id}")]]
-        reply_markup_da = InlineKeyboardMarkup(keyboard)
-        da_sub = db.get_subscription(ticket['da_id'], "DA")
-        if da_sub:
-            bot_da = Bot(token=config.DA_BOT_TOKEN)
-            bot_da.send_message(chat_id=da_sub['chat_id'], text=text_da, reply_markup=reply_markup_da, parse_mode="HTML")
-        else:
-            query.edit_message_text(text="لم يتم العثور على الوكيل.")
-        return MAIN_MENU
+        client_solution = ""
+        if ticket["logs"]:
+            try:
+                logs = json.loads(ticket["logs"])
+                for entry in logs:
+                    if entry.get("action") == "client_solution":
+                        client_solution = entry.get("message", "")
+                        break
+            except Exception:
+                client_solution = ""
+        context.user_data['ticket_id'] = ticket_id
+        context.user_data['action'] = 'edit'
+        context.user_data['awaiting_response'] = True
+        context.bot.send_message(chat_id=query.message.chat_id,
+                                 text=f"أدخل رسالة الحل المعدلة للمشكلة:\nالحل الحالي: {client_solution}",
+                                 reply_markup=ForceReply(selective=True))
+        return AWAITING_RESPONSE
+
+    elif data.startswith("moreinfo_"):
+        ticket_id = int(data.split("_")[1])
+        context.user_data['ticket_id'] = ticket_id
+        context.user_data['action'] = 'moreinfo'
+        context.user_data['awaiting_response'] = True
+        context.bot.send_message(chat_id=query.message.chat_id,
+                                 text="أدخل المعلومات الإضافية المطلوبة:",
+                                 reply_markup=ForceReply(selective=True))
+        return AWAITING_RESPONSE
 
     elif data.startswith("sendclient_"):
         ticket_id = int(data.split("_")[1])
@@ -191,6 +198,40 @@ def callback_handler(update: Update, context: CallbackContext):
         query.edit_message_text(text=f"تم تعيين العميل إلى {client_choice} وإرسال التذكرة للعميل.")
         return MAIN_MENU
 
+    elif data.startswith("sendto_da_"):
+        # When the supervisor wants to forward the client's solution to the DA
+        parts = data.split("_")
+        if len(parts) < 3:
+            query.edit_message_text(text="تنسيق البيانات غير صحيح.")
+            return MAIN_MENU
+        try:
+            ticket_id = int(parts[2])
+        except ValueError:
+            query.edit_message_text(text="معرف التذكرة غير صحيح.")
+            return MAIN_MENU
+        ticket = db.get_ticket(ticket_id)
+        if not ticket:
+            query.edit_message_text(text="التذكرة غير موجودة.")
+            return MAIN_MENU
+        # Retrieve the client's solution from the ticket logs
+        client_solution = None
+        if ticket["logs"]:
+            try:
+                logs = json.loads(ticket["logs"])
+                for log in logs:
+                    if log.get("action") == "client_solution":
+                        client_solution = log.get("message")
+                        break
+            except Exception:
+                client_solution = None
+        if not client_solution:
+            client_solution = "لا يوجد حل من العميل."
+        # Update ticket status and add a log entry for forwarding
+        db.update_ticket_status(ticket_id, "Pending DA Action", {"action": "supervisor_forward", "message": client_solution})
+        notify_da(ticket_id, client_solution, info_request=False)
+        query.edit_message_text(text="تم إرسال التذكرة إلى الوكيل.")
+        return MAIN_MENU
+
     else:
         query.edit_message_text(text="الإجراء غير معروف.")
         return MAIN_MENU
@@ -202,10 +243,13 @@ def awaiting_response_handler(update: Update, context: CallbackContext):
     if not ticket_id or not action:
         update.message.reply_text("حدث خطأ. الرجاء إعادة المحاولة.")
         return MAIN_MENU
-    if action == 'solve':
-        db.update_ticket_status(ticket_id, "Pending DA Action", {"action": "supervisor_resolution", "message": response})
+    if action in ['solve', 'edit']:
+        db.update_ticket_status(ticket_id, "Pending DA Action", {"action": "supervisor_solution", "message": response})
         notify_da(ticket_id, response, info_request=False)
-        update.message.reply_text("تم إرسال الحل إلى الوكيل.")
+        if action == 'solve':
+            update.message.reply_text("تم إرسال الحل إلى الوكيل.")
+        else:
+            update.message.reply_text("تم تعديل الحل وإرساله إلى الوكيل.")
     elif action == 'moreinfo':
         db.update_ticket_status(ticket_id, "Pending DA Response", {"action": "request_more_info", "message": response})
         notify_da(ticket_id, response, info_request=True)
@@ -218,6 +262,9 @@ def awaiting_response_handler(update: Update, context: CallbackContext):
 def notify_da(ticket_id, message, info_request=False):
     ticket = db.get_ticket(ticket_id)
     da_id = ticket['da_id']
+    if not da_id:
+        logger.error("لا يوجد وكيل معين للتذكرة.")
+        return
     bot = Bot(token=config.DA_BOT_TOKEN)
     if info_request:
         text = (
@@ -279,7 +326,7 @@ def main():
             SUBSCRIPTION_PHONE: [MessageHandler(Filters.text & ~Filters.command, subscription_phone)],
             MAIN_MENU: [
                 MessageHandler(Filters.text & ~Filters.command, main_menu_handler),
-                CallbackQueryHandler(callback_handler, pattern="^(view_|solve_|moreinfo_|sendclient_|setclient_).*")
+                CallbackQueryHandler(callback_handler, pattern="^(view_|solve_|edit_|moreinfo_|sendclient_|setclient_|sendto_da_).*")
             ],
             SEARCH_TICKETS: [MessageHandler(Filters.text & ~Filters.command, search_tickets)],
             AWAITING_RESPONSE: [MessageHandler(Filters.text & ~Filters.command, awaiting_response_handler)]
