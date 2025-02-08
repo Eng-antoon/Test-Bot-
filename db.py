@@ -5,7 +5,8 @@ from datetime import datetime
 from config import DATABASE
 
 def get_connection():
-    conn = sqlite3.connect(DATABASE, check_same_thread=False)
+    # Added a timeout to help with potential SQLite locking issues.
+    conn = sqlite3.connect(DATABASE, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -167,3 +168,9 @@ def get_users_by_role(role, client=None):
     users = c.fetchall()
     conn.close()
     return users
+
+def get_user(user_id, bot):
+    """
+    A helper function to retrieve a user/subscription by user_id and bot.
+    """
+    return get_subscription(user_id, bot)

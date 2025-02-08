@@ -2,18 +2,24 @@
 # da_bot.py
 import logging
 import datetime
+import unicodedata
+import urllib.parse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Bot
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler, ConversationHandler, CallbackContext
+from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
+                          CallbackQueryHandler, ConversationHandler, CallbackContext)
 import db
 import config
+import notifier  # For sending notifications to supervisors
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Set logging level to DEBUG for troubleshooting.
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Conversation states (0 to 11)
+# Conversation states (we now need 13 values)
 (SUBSCRIPTION_PHONE, MAIN_MENU, NEW_ISSUE_CLIENT, NEW_ISSUE_ORDER,
- NEW_ISSUE_DESCRIPTION, NEW_ISSUE_REASON, NEW_ISSUE_TYPE, ASK_IMAGE, WAIT_IMAGE, AWAITING_DA_RESPONSE,
- EDIT_PROMPT, EDIT_FIELD) = range(12)
+ NEW_ISSUE_DESCRIPTION, NEW_ISSUE_REASON, NEW_ISSUE_TYPE, ASK_IMAGE, WAIT_IMAGE,
+ AWAITING_DA_RESPONSE, EDIT_PROMPT, EDIT_FIELD, MORE_INFO_PROMPT) = range(13)
 
 # Mapping of issue reasons to available types.
 ISSUE_OPTIONS = {
@@ -25,10 +31,51 @@ ISSUE_OPTIONS = {
     "التسليم": ["وصول متاخر", "تالف", "عطل بالسياره"]
 }
 
-# --------------------------
-# Basic flow functions
-# --------------------------
+### NEW: Helper to Prompt DA for More Info ###
+def prompt_da_for_more_info(ticket_id: int, chat_id: int, context: CallbackContext):
+    """
+    Retrieves the ticket and sends an instructional message to the DA
+    asking for additional information. Uses ForceReply so that the DA’s reply
+    is attached to this prompt.
+    """
+    ticket = db.get_ticket(ticket_id)
+    if not ticket:
+        logger.error("prompt_da_for_more_info: Ticket %s not found", ticket_id)
+        context.bot.send_message(chat_id=chat_id, text="خطأ: التذكرة غير موجودة.")
+        return
+    text = (
+        f"<b>التذكرة #{ticket_id}</b>\n"
+        f"رقم الطلب: {ticket['order_id']}\n"
+        f"الوصف: {ticket['issue_description']}\n"
+        f"الحالة: {ticket['status']}\n\n"
+        "يرجى إدخال المعلومات الإضافية المطلوبة للتذكرة:"
+    )
+    logger.debug("prompt_da_for_more_info: Prompting DA in chat %s for ticket %s", chat_id, ticket_id)
+    context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=ForceReply(selective=True))
 
+### Additional Info Notification Helper (unchanged) ###
+def notify_supervisors_da_moreinfo(ticket_id: int, additional_info: str):
+    ticket = db.get_ticket(ticket_id)
+    if not ticket:
+        logger.error("notify_supervisors_da_moreinfo: Ticket %s not found", ticket_id)
+        return
+    bot = Bot(token=config.SUPERVISOR_BOT_TOKEN)
+    text = (f"<b>معلومات إضافية من الوكيل للتذكرة #{ticket_id}</b>\n"
+            f"رقم الطلب: {ticket['order_id']}\n"
+            f"الوصف: {ticket['issue_description']}\n"
+            f"المعلومات الإضافية: {additional_info}\n"
+            f"الحالة: {ticket['status']}")
+    keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view|{ticket_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    logger.debug("notify_supervisors_da_moreinfo: Notifying supervisors for ticket %s", ticket_id)
+    for sup in db.get_supervisors():
+        try:
+            bot.send_message(chat_id=sup['chat_id'], text=text, reply_markup=reply_markup, parse_mode="HTML")
+            logger.debug("notify_supervisors_da_moreinfo: Notified supervisor %s", sup['chat_id'])
+        except Exception as e:
+            logger.error("notify_supervisors_da_moreinfo: Error notifying supervisor %s: %s", sup['chat_id'], e)
+
+### START, SUBSCRIPTION, NEW ISSUE FLOW (unchanged) ###
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
     sub = db.get_subscription(user.id, "DA")
@@ -57,6 +104,7 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
     data = query.data
+    logger.debug("da_main_menu_callback: Received data: %s", data)
     if data == "menu_add_issue":
         keyboard = [[InlineKeyboardButton("بوبا", callback_data="client_option_بوبا"),
                      InlineKeyboardButton("بتلكو", callback_data="client_option_بتلكو"),
@@ -66,10 +114,8 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
         return NEW_ISSUE_CLIENT
     elif data == "menu_query_issue":
         user = query.from_user
-        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        tickets = [t for t in db.get_all_tickets() if t['da_id'] == user.id and t['created_at'].startswith(today_str)]
+        tickets = [t for t in db.get_all_tickets() if t['da_id'] == user.id]
         if tickets:
-            # Show full details with status (translated) and resolution if closed.
             status_mapping = {
                 "Opened": "مفتوحة",
                 "Pending DA Action": "في انتظار إجراء الوكيل",
@@ -93,7 +139,7 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
                         f"الحالة: {status_ar}{resolution}")
                 query.message.reply_text(text, parse_mode="HTML")
         else:
-            query.edit_message_text("لا توجد تذاكر اليوم.")
+            query.edit_message_text("لا توجد تذاكر.")
         return MAIN_MENU
     elif data.startswith("client_option_"):
         client_selected = data.split("_", 2)[2]
@@ -104,12 +150,12 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
         reason = data.split("_", 2)[2]
         context.user_data['issue_reason'] = reason
         types = ISSUE_OPTIONS.get(reason, [])
-        keyboard = [[InlineKeyboardButton(t, callback_data=f"issue_type_{t}")] for t in types]
+        keyboard = [[InlineKeyboardButton(t, callback_data="issue_type_" + t)] for t in types]
         reply_markup = InlineKeyboardMarkup(keyboard)
         query.edit_message_text("اختر نوع المشكلة:", reply_markup=reply_markup)
         return NEW_ISSUE_TYPE
     elif data.startswith("issue_type_"):
-        issue_type = data.split("_", 2)[2]
+        issue_type = urllib.parse.unquote(data.split("_", 2)[2])
         context.user_data['issue_type'] = issue_type
         keyboard = [[InlineKeyboardButton("نعم", callback_data="attach_yes"),
                      InlineKeyboardButton("لا", callback_data="attach_no")]]
@@ -122,11 +168,29 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
             return WAIT_IMAGE
         else:
             return show_ticket_summary_for_edit(query, context)
+    elif data.startswith("da_moreinfo|"):
+        # New branch: handle "da_moreinfo" callbacks in MAIN_MENU state.
+        return da_moreinfo_callback_handler(update, context)
     elif data.startswith("edit_ticket_") or data.startswith("edit_field_"):
         return edit_ticket_prompt_callback(update, context)
     else:
         query.edit_message_text("الخيار غير معروف.")
         return MAIN_MENU
+
+### NEW: Handler for "da_moreinfo|" callbacks ###
+def da_moreinfo_callback_handler(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    data = query.data
+    try:
+        ticket_id = int(data.split("|")[1])
+    except (IndexError, ValueError):
+        query.edit_message_text("خطأ في بيانات التذكرة.")
+        return MAIN_MENU
+    context.user_data['ticket_id'] = ticket_id
+    logger.debug("da_moreinfo_callback_handler: Stored ticket_id=%s", ticket_id)
+    prompt_da_for_more_info(ticket_id, query.message.chat.id, context)
+    return MORE_INFO_PROMPT
 
 def new_issue_order(update: Update, context: CallbackContext):
     order_id = update.message.text.strip()
@@ -156,9 +220,13 @@ def wait_image(update: Update, context: CallbackContext):
         update.message.reply_text("لم يتم إرسال صورة صحيحة. أعد الإرسال:")
         return WAIT_IMAGE
 
-def show_ticket_summary_for_edit(source, context):
-    # source can be a Message or CallbackQuery.
-    msg_func = source.edit_message_text if hasattr(source, 'edit_message_text') else context.bot.send_message
+def show_ticket_summary_for_edit(source, context: CallbackContext):
+    if hasattr(source, 'edit_message_text'):
+        msg_func = source.edit_message_text
+        kwargs = {}
+    else:
+        msg_func = context.bot.send_message
+        kwargs = {'chat_id': source.chat.id}
     data = context.user_data
     summary = (f"رقم الطلب: {data.get('order_id','')}\n"
                f"الوصف: {data.get('description','')}\n"
@@ -167,10 +235,9 @@ def show_ticket_summary_for_edit(source, context):
                f"العميل: {data.get('client','')}\n"
                f"الصورة: {data.get('image', 'لا توجد')}")
     text = "ملخص التذكرة المدخلة:\n" + summary + "\nهل تريد تعديل التذكرة قبل الإرسال؟"
-    keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
-                 InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    msg_func(text=text, reply_markup=reply_markup)
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
+                                            InlineKeyboardButton("لا", callback_data="edit_ticket_no")]])
+    msg_func(text=text, reply_markup=reply_markup, **kwargs)
     return EDIT_PROMPT
 
 def edit_ticket_prompt_callback(update: Update, context: CallbackContext):
@@ -198,68 +265,135 @@ def edit_ticket_prompt_callback(update: Update, context: CallbackContext):
         query.edit_message_text("هل تريد تعديل التذكرة قبل الإرسال؟", reply_markup=reply_markup)
         return EDIT_PROMPT
 
+### Using index-based mapping for editing issue reason and issue type (unchanged) ###
 def edit_field_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
-    field = query.data  # e.g., "edit_field_order"
-    context.user_data['edit_field'] = field
+    field = query.data
     if field == "edit_field_issue_reason":
-        keyboard = [
-            [InlineKeyboardButton("المخزن", callback_data="issue_reason_المخزن"),
-             InlineKeyboardButton("المورد", callback_data="issue_reason_المورد")],
-            [InlineKeyboardButton("العميل", callback_data="issue_reason_العميل"),
-             InlineKeyboardButton("التسليم", callback_data="issue_reason_التسليم")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        options = ["المخزن", "المورد", "العميل", "التسليم"]
+        mapping = {}
+        keyboard_buttons = []
+        for i, option in enumerate(options):
+            key = str(i)
+            mapping[key] = option
+            keyboard_buttons.append([InlineKeyboardButton(option, callback_data="edit_field_issue_reason_idx_" + key)])
+        context.user_data['edit_reason_map'] = mapping
+        reply_markup = InlineKeyboardMarkup(keyboard_buttons)
         query.edit_message_text("اختر سبب المشكلة الجديد:", reply_markup=reply_markup)
         return EDIT_FIELD
-    elif field == "edit_field_issue_type":
+
+    if field.startswith("edit_field_issue_reason_idx_"):
+        idx = field[len("edit_field_issue_reason_idx_"):]
+        mapping = context.user_data.get('edit_reason_map', {})
+        new_reason = mapping.get(idx)
+        if not new_reason:
+            query.edit_message_text("خطأ في اختيار سبب المشكلة.")
+            return EDIT_PROMPT
+        context.user_data['issue_reason'] = new_reason
+        log_entry = {"action": "edit_field", "field": "سبب المشكلة", "new_value": new_reason}
+        context.user_data.setdefault('edit_log', []).append(log_entry)
+        types = ISSUE_OPTIONS.get(new_reason, [])
+        if types:
+            mapping2 = {}
+            keyboard_buttons = []
+            for i, opt in enumerate(types):
+                key = str(i)
+                mapping2[key] = opt
+                keyboard_buttons.append([InlineKeyboardButton(opt, callback_data="edit_field_issue_type_idx_" + key)])
+            context.user_data['edit_type_map'] = mapping2
+            reply_markup = InlineKeyboardMarkup(keyboard_buttons)
+            query.edit_message_text(f"تم تعديل سبب المشكلة إلى: {new_reason}\nالآن اختر نوع المشكلة:", reply_markup=reply_markup)
+            return EDIT_FIELD
+        else:
+            query.edit_message_text(f"تم تعديل سبب المشكلة إلى: {new_reason}\nولا توجد خيارات متاحة لنوع المشكلة لهذا السبب.")
+            return EDIT_PROMPT
+
+    if field == "edit_field_issue_type":
         current_reason = context.user_data.get('issue_reason', '')
         types = ISSUE_OPTIONS.get(current_reason, [])
         if not types:
             query.edit_message_text("لا توجد خيارات متاحة لنوع المشكلة.")
             return EDIT_PROMPT
-        keyboard = [[InlineKeyboardButton(t, callback_data="edit_field_issue_type_" + t)] for t in types]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        mapping = {}
+        keyboard_buttons = []
+        for i, option in enumerate(types):
+            key = str(i)
+            mapping[key] = option
+            keyboard_buttons.append([InlineKeyboardButton(option, callback_data="edit_field_issue_type_idx_" + key)])
+        context.user_data['edit_type_map'] = mapping
+        reply_markup = InlineKeyboardMarkup(keyboard_buttons)
         query.edit_message_text("اختر نوع المشكلة الجديد:", reply_markup=reply_markup)
         return EDIT_FIELD
-    elif field == "edit_field_client":
-        keyboard = [[InlineKeyboardButton("بوبا", callback_data="edit_field_client_بوبا"),
-                     InlineKeyboardButton("بتلكو", callback_data="edit_field_client_بتلكو"),
-                     InlineKeyboardButton("بيبس", callback_data="edit_field_client_بيبس")]]
+
+    if field in ["edit_field_order", "edit_field_description", "edit_field_image", "edit_field_client"]:
+        context.user_data['edit_field'] = field
+        if field == "edit_field_client":
+            keyboard = [[InlineKeyboardButton("بوبا", callback_data="edit_field_client_بوبا"),
+                         InlineKeyboardButton("بتلكو", callback_data="edit_field_client_بتلكو"),
+                         InlineKeyboardButton("بيبس", callback_data="edit_field_client_بيبس")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            query.edit_message_text("اختر العميل الجديد:", reply_markup=reply_markup)
+            return EDIT_FIELD
+        else:
+            field_name = field.split('_')[-1]
+            query.edit_message_text(f"أدخل القيمة الجديدة لـ {field_name}:")
+            return EDIT_FIELD
+
+    if field.startswith("edit_field_issue_type_idx_"):
+        idx = field[len("edit_field_issue_type_idx_"):]
+        mapping = context.user_data.get('edit_type_map', {})
+        new_type = mapping.get(idx)
+        if not new_type:
+            query.edit_message_text("خطأ في اختيار نوع المشكلة.")
+            return EDIT_PROMPT
+        context.user_data['issue_type'] = new_type
+        log_entry = {"action": "edit_field", "field": "نوع المشكلة", "new_value": new_type}
+        context.user_data.setdefault('edit_log', []).append(log_entry)
+        query.edit_message_text(f"تم تعديل نوع المشكلة إلى: {new_type}")
+        keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
+                     InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("اختر العميل الجديد:", reply_markup=reply_markup)
-        return EDIT_FIELD
-    else:
-        field_name = field.split('_')[-1]
-        query.edit_message_text(f"أدخل القيمة الجديدة لـ {field_name}:")
-        return EDIT_FIELD
+        query.bot.send_message(chat_id=query.message.chat.id,
+                               text="هل تريد تعديل التذكرة مرة أخرى؟",
+                               reply_markup=reply_markup)
+        return EDIT_PROMPT
+
+    if field.startswith("edit_field_client_"):
+        new_client = field[len("edit_field_client_"):].strip()
+        context.user_data['client'] = new_client
+        log_entry = {"action": "edit_field", "field": "العميل", "new_value": new_client}
+        context.user_data.setdefault('edit_log', []).append(log_entry)
+        query.edit_message_text(f"تم تعديل العميل إلى: {new_client}")
+        keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
+                     InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.bot.send_message(chat_id=query.message.chat.id,
+                               text="هل تريد تعديل التذكرة مرة أخرى؟",
+                               reply_markup=reply_markup)
+        return EDIT_PROMPT
+
+    field_name = field.split('_')[-1]
+    context.user_data['edit_field'] = field
+    query.edit_message_text(f"أدخل القيمة الجديدة لـ {field_name}:")
+    return EDIT_FIELD
 
 def edit_field_input_handler(update: Update, context: CallbackContext):
     if 'edit_field' in context.user_data:
         field = context.user_data['edit_field']
-        if field.startswith("edit_field_issue_type_"):
-            new_value = field.split('_', 3)[-1]
-            context.user_data['issue_type'] = new_value
-            log_entry = {"action": "edit_field", "field": "نوع المشكلة", "new_value": new_value}
-        elif field.startswith("edit_field_client_"):
-            new_value = field.split('_', 3)[-1]
-            context.user_data['client'] = new_value
-            log_entry = {"action": "edit_field", "field": "العميل", "new_value": new_value}
-        else:
-            new_value = update.message.text.strip()
-            field_name = field.split('_')[-1]
-            if field == "edit_field_order":
-                context.user_data['order_id'] = new_value
-            elif field == "edit_field_description":
-                context.user_data['description'] = new_value
-            elif field == "edit_field_image":
-                context.user_data['image'] = new_value
-            elif field == "edit_field_issue_reason":
-                context.user_data['issue_reason'] = new_value
-            log_entry = {"action": "edit_field", "field": field_name, "new_value": new_value}
+        new_value = update.message.text.strip()
+        if field == "edit_field_order":
+            context.user_data['order_id'] = new_value
+        elif field == "edit_field_description":
+            context.user_data['description'] = new_value
+        elif field == "edit_field_image":
+            context.user_data['image'] = new_value
+        elif field == "edit_field_issue_reason":
+            context.user_data['issue_reason'] = new_value
+        field_name = field.split('_')[-1]
+        log_entry = {"action": "edit_field", "field": field_name, "new_value": new_value}
         context.user_data.setdefault('edit_log', []).append(log_entry)
-        update.message.reply_text(f"تم تعديل {field.split('_')[-1]} إلى: {new_value}")
+        update.message.reply_text(f"تم تعديل {field_name} إلى: {new_value}")
         keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
                      InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -268,35 +402,6 @@ def edit_field_input_handler(update: Update, context: CallbackContext):
     else:
         update.message.reply_text("حدث خطأ أثناء التعديل.")
         return EDIT_PROMPT
-
-# --- MISSING FUNCTION DEFINITION ---
-def notify_supervisors(ticket_id, da_user):
-    """
-    Notifies all supervisors about the new ticket.
-    """
-    ticket = db.get_ticket(ticket_id)
-    supervisors = db.get_supervisors()
-    message = (
-        f"<b>تذكرة جديدة من {da_user.first_name} (ID: {da_user.id})</b>\n"
-        f"رقم الطلب: {ticket['order_id']}\n"
-        f"العميل: {ticket['client']}\n"
-        f"الوصف: {ticket['issue_description']}\n"
-        f"سبب المشكلة: {ticket['issue_reason']}\n"
-        f"نوع المشكلة: {ticket['issue_type']}\n"
-        f"الحالة: {ticket['status']}"
-    )
-    keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view_{ticket_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    bot = Bot(token=config.SUPERVISOR_BOT_TOKEN)
-    for sup in supervisors:
-        try:
-            bot.send_message(chat_id=sup['chat_id'], text=message, reply_markup=reply_markup, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Error notifying supervisor {sup['chat_id']}: {e}")
-
-# --------------------------
-# Finalization and additional flows
-# --------------------------
 
 def finalize_ticket_da(source, context, image_url):
     if hasattr(source, 'from_user'):
@@ -317,35 +422,22 @@ def finalize_ticket_da(source, context, image_url):
     if 'edit_log' in context.user_data:
         for log_entry in context.user_data['edit_log']:
             db.update_ticket_status(ticket_id, "Opened", log_entry)
-    notify_supervisors(ticket_id, user)
+    ticket = db.get_ticket(ticket_id)
+    notifier.notify_supervisors(ticket)
     context.user_data.clear()
     return MAIN_MENU
 
 def da_awaiting_response_handler(update: Update, context: CallbackContext):
     additional_info = update.message.text.strip()
     ticket_id = context.user_data.get('ticket_id')
+    logger.debug("da_awaiting_response_handler: Received additional_info='%s' for ticket_id=%s", additional_info, ticket_id)
     if not ticket_id:
         update.message.reply_text("حدث خطأ. أعد المحاولة.")
         return MAIN_MENU
     db.update_ticket_status(ticket_id, "Additional Info Provided", {"action": "da_moreinfo", "message": additional_info})
-    ticket = db.get_ticket(ticket_id)
-    text = (f"<b>تحديث للتذكرة #{ticket_id}</b>\n"
-            f"رقم الطلب: {ticket['order_id']}\n"
-            f"الوصف: {ticket['issue_description']}\n"
-            f"سبب المشكلة: {ticket['issue_reason']}\n"
-            f"نوع المشكلة: {ticket['issue_type']}\n"
-            f"الحالة: {ticket['status']}\n\n"
-            f"المعلومات الإضافية: {additional_info}\n\n"
-            "يمكن للمشرف الآن عرض التفاصيل واتخاذ الإجراء المناسب.")
-    keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view_{ticket_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    logger.debug("da_awaiting_response_handler: Updated ticket status for ticket_id=%s", ticket_id)
+    notify_supervisors_da_moreinfo(ticket_id, additional_info)
     update.message.reply_text("تم إرسال المعلومات الإضافية إلى المشرف.")
-    bot_sup = Bot(token=config.SUPERVISOR_BOT_TOKEN)
-    for sup in db.get_supervisors():
-        try:
-            bot_sup.send_message(chat_id=sup['chat_id'], text=text, reply_markup=reply_markup, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Error notifying supervisors: {e}")
     context.user_data.pop('ticket_id', None)
     return MAIN_MENU
 
@@ -353,8 +445,9 @@ def da_callback_handler(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
     data = query.data
-    if data.startswith("close_"):
-        ticket_id = int(data.split("_")[1])
+    logger.debug("da_callback_handler: Received callback data: %s", data)
+    if data.startswith("close|"):
+        ticket_id = int(data.split("|")[1])
         db.update_ticket_status(ticket_id, "Closed", {"action": "da_closed"})
         query.edit_message_text("تم إغلاق التذكرة بنجاح.")
         bot_sup = Bot(token=config.SUPERVISOR_BOT_TOKEN)
@@ -364,27 +457,28 @@ def da_callback_handler(update: Update, context: CallbackContext):
                                      text=f"التذكرة #{ticket_id} تم إغلاقها من قبل الوكيل.",
                                      parse_mode="HTML")
             except Exception as e:
-                logger.error(f"Error notifying supervisor of closure: {e}")
+                logger.error("da_callback_handler: Error notifying supervisor of closure for ticket %s: %s", ticket_id, e)
         return MAIN_MENU
-    elif data.startswith("da_moreinfo_"):
-        parts = data.split("_", 2)
-        try:
-            ticket_id = int(parts[2])
-        except (IndexError, ValueError):
-            query.edit_message_text("خطأ في بيانات التذكرة.")
-            return MAIN_MENU
-        context.user_data['ticket_id'] = ticket_id
-        ticket = db.get_ticket(ticket_id)
-        text = (f"<b>التذكرة #{ticket_id}</b>\n"
-                f"رقم الطلب: {ticket['order_id']}\n"
-                f"الوصف: {ticket['issue_description']}\n"
-                f"الحالة: {ticket['status']}\n\n"
-                "أدخل المعلومات الإضافية المطلوبة للتذكرة:")
-        context.bot.send_message(chat_id=query.message.chat_id, text=text, reply_markup=ForceReply(selective=True), parse_mode="HTML")
-        return AWAITING_DA_RESPONSE
+    elif data.startswith("da_moreinfo|"):
+        # Instead of handling here, we delegate to the conversation handler.
+        return da_moreinfo_callback_handler(update, context)
     else:
         query.edit_message_text("الإجراء غير معروف.")
         return MAIN_MENU
+
+def da_moreinfo_callback_handler(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    data = query.data
+    try:
+        ticket_id = int(data.split("|")[1])
+    except (IndexError, ValueError):
+        query.edit_message_text("خطأ في بيانات التذكرة.")
+        return MAIN_MENU
+    context.user_data['ticket_id'] = ticket_id
+    logger.debug("da_moreinfo_callback_handler: Stored ticket_id=%s", ticket_id)
+    prompt_da_for_more_info(ticket_id, query.message.chat.id, context)
+    return MORE_INFO_PROMPT
 
 def default_handler_da(update: Update, context: CallbackContext):
     keyboard = [[InlineKeyboardButton("إضافة مشكلة", callback_data="menu_add_issue"),
@@ -397,40 +491,6 @@ def default_handler_da_edit(update: Update, context: CallbackContext):
     update.message.reply_text("الرجاء إدخال القيمة المطلوبة أو اختر من الخيارات المتاحة.")
     return EDIT_FIELD
 
-def edit_field_input_handler(update: Update, context: CallbackContext):
-    if 'edit_field' in context.user_data:
-        field = context.user_data['edit_field']
-        if field.startswith("edit_field_issue_type_"):
-            new_value = field.split('_', 3)[-1]
-            context.user_data['issue_type'] = new_value
-            log_entry = {"action": "edit_field", "field": "نوع المشكلة", "new_value": new_value}
-        elif field.startswith("edit_field_client_"):
-            new_value = field.split('_', 3)[-1]
-            context.user_data['client'] = new_value
-            log_entry = {"action": "edit_field", "field": "العميل", "new_value": new_value}
-        else:
-            new_value = update.message.text.strip()
-            field_name = field.split('_')[-1]
-            if field == "edit_field_order":
-                context.user_data['order_id'] = new_value
-            elif field == "edit_field_description":
-                context.user_data['description'] = new_value
-            elif field == "edit_field_image":
-                context.user_data['image'] = new_value
-            elif field == "edit_field_issue_reason":
-                context.user_data['issue_reason'] = new_value
-            log_entry = {"action": "edit_field", "field": field_name, "new_value": new_value}
-        context.user_data.setdefault('edit_log', []).append(log_entry)
-        update.message.reply_text(f"تم تعديل {field.split('_')[-1]} إلى: {new_value}")
-        keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
-                     InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        update.message.reply_text("هل تريد تعديل التذكرة مرة أخرى؟", reply_markup=reply_markup)
-        return EDIT_PROMPT
-    else:
-        update.message.reply_text("حدث خطأ أثناء التعديل.")
-        return EDIT_PROMPT
-
 def main():
     updater = Updater(config.DA_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
@@ -438,8 +498,12 @@ def main():
         entry_points=[CommandHandler('start', start)],
         states={
             SUBSCRIPTION_PHONE: [MessageHandler(Filters.text & ~Filters.command, subscription_phone)],
-            MAIN_MENU: [CallbackQueryHandler(da_main_menu_callback,
-                                             pattern="^(menu_add_issue|menu_query_issue|client_option_|issue_reason_|issue_type_|attach_.*|edit_ticket_.*|edit_field_.*)")],
+            # In MAIN_MENU, we add an extra MessageHandler to catch any stray text messages and show the main menu.
+            MAIN_MENU: [
+                CallbackQueryHandler(da_main_menu_callback,
+                                     pattern="^(menu_add_issue|menu_query_issue|client_option_.*|issue_reason_.*|issue_type_.*|attach_.*|edit_ticket_.*|edit_field_.*|da_moreinfo\\|.*)"),
+                MessageHandler(Filters.text & ~Filters.command, default_handler_da)
+            ],
             NEW_ISSUE_CLIENT: [CallbackQueryHandler(da_main_menu_callback, pattern="^client_option_.*")],
             NEW_ISSUE_ORDER: [MessageHandler(Filters.text & ~Filters.command, new_issue_order)],
             NEW_ISSUE_DESCRIPTION: [MessageHandler(Filters.text & ~Filters.command, new_issue_description)],
@@ -448,15 +512,16 @@ def main():
             ASK_IMAGE: [CallbackQueryHandler(da_main_menu_callback, pattern="^(attach_yes|attach_no)$")],
             WAIT_IMAGE: [MessageHandler(Filters.photo, wait_image)],
             EDIT_PROMPT: [CallbackQueryHandler(edit_ticket_prompt_callback, pattern="^(edit_ticket_yes|edit_ticket_no)$")],
-            EDIT_FIELD: [CallbackQueryHandler(edit_field_callback, pattern="^edit_field_.*"),
-                         MessageHandler(Filters.text & ~Filters.command, edit_field_input_handler)],
-            AWAITING_DA_RESPONSE: [MessageHandler(Filters.text & ~Filters.command, da_awaiting_response_handler)]
+            EDIT_FIELD: [
+                CallbackQueryHandler(edit_field_callback, pattern="^edit_field_.*"),
+                MessageHandler(Filters.text & ~Filters.command, edit_field_input_handler)
+            ],
+            MORE_INFO_PROMPT: [MessageHandler(Filters.text & ~Filters.command, da_awaiting_response_handler)]
         },
         fallbacks=[CommandHandler('cancel', lambda u, c: u.message.reply_text("تم إلغاء العملية."))]
     )
     dp.add_handler(conv_handler)
-    dp.add_handler(CallbackQueryHandler(da_callback_handler, pattern="^(close_|da_moreinfo_).*"))
-    dp.add_handler(MessageHandler(Filters.text, default_handler_da))
+    dp.add_handler(CallbackQueryHandler(da_callback_handler, pattern="^(close\\||da_moreinfo\\|).*"))
     updater.start_polling()
     updater.idle()
 

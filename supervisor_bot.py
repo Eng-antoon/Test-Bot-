@@ -49,7 +49,7 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
                         f"العميل: {ticket['client']}\n"
                         f"الوصف: {ticket['issue_description']}\n"
                         f"الحالة: {ticket['status']}")
-                keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view_{ticket['ticket_id']}")]]
+                keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view|{ticket['ticket_id']}")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 query.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
         else:
@@ -58,8 +58,8 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
     elif data == "menu_query_issue":
         query.edit_message_text("أدخل رقم الطلب:")
         return SEARCH_TICKETS
-    elif data.startswith("view_"):
-        ticket_id = int(data.split("_")[1])
+    elif data.startswith("view|"):
+        ticket_id = int(data.split("|")[1])
         ticket = db.get_ticket(ticket_id)
         if ticket:
             try:
@@ -78,21 +78,20 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
                     f"نوع المشكلة: {ticket['issue_type']}\n"
                     f"الحالة: {ticket['status']}\n\n"
                     f"السجلات:\n{logs}")
-            # "تحرير الحل" button removed.
             keyboard = [
-                [InlineKeyboardButton("حل المشكلة", callback_data=f"solve_{ticket_id}")],
-                [InlineKeyboardButton("طلب المزيد من المعلومات", callback_data=f"moreinfo_{ticket_id}")],
-                [InlineKeyboardButton("إرسال إلى العميل", callback_data=f"sendclient_{ticket_id}")]
+                [InlineKeyboardButton("حل المشكلة", callback_data=f"solve|{ticket_id}")],
+                [InlineKeyboardButton("طلب المزيد من المعلومات", callback_data=f"moreinfo|{ticket_id}")],
+                [InlineKeyboardButton("إرسال إلى العميل", callback_data=f"sendclient|{ticket_id}")]
             ]
             if ticket["status"] == "Client Responded":
-                keyboard.insert(0, [InlineKeyboardButton("إرسال للحالة إلى الوكيل", callback_data=f"sendto_da_{ticket_id}")])
+                keyboard.insert(0, [InlineKeyboardButton("إرسال للحالة إلى الوكيل", callback_data=f"sendto_da|{ticket_id}")])
             reply_markup = InlineKeyboardMarkup(keyboard)
             query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
         else:
             query.edit_message_text("التذكرة غير موجودة.")
         return MAIN_MENU
-    elif data.startswith("solve_"):
-        ticket_id = int(data.split("_")[1])
+    elif data.startswith("solve|"):
+        ticket_id = int(data.split("|")[1])
         context.user_data['ticket_id'] = ticket_id
         context.user_data['action'] = 'solve'
         context.user_data['awaiting_response'] = True
@@ -100,8 +99,8 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
                                  text="أدخل رسالة الحل للمشكلة:",
                                  reply_markup=ForceReply(selective=True))
         return AWAITING_RESPONSE
-    elif data.startswith("moreinfo_"):
-        ticket_id = int(data.split("_")[1])
+    elif data.startswith("moreinfo|"):
+        ticket_id = int(data.split("|")[1])
         context.user_data['ticket_id'] = ticket_id
         context.user_data['action'] = 'moreinfo'
         context.user_data['awaiting_response'] = True
@@ -109,33 +108,31 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
                                  text="أدخل المعلومات الإضافية المطلوبة:",
                                  reply_markup=ForceReply(selective=True))
         return AWAITING_RESPONSE
-    elif data.startswith("sendclient_"):
-        ticket_id = int(data.split("_")[1])
-        # Show confirmation before sending to client.
-        keyboard = [[InlineKeyboardButton("نعم", callback_data=f"confirm_sendclient_{ticket_id}"),
-                     InlineKeyboardButton("لا", callback_data=f"cancel_sendclient_{ticket_id}")]]
+    elif data.startswith("sendclient|"):
+        ticket_id = int(data.split("|")[1])
+        keyboard = [[InlineKeyboardButton("نعم", callback_data=f"confirm_sendclient|{ticket_id}"),
+                     InlineKeyboardButton("لا", callback_data=f"cancel_sendclient|{ticket_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         query.edit_message_text("هل أنت متأكد من إرسال التذكرة إلى العميل؟", reply_markup=reply_markup)
         return MAIN_MENU
-    elif data.startswith("confirm_sendclient_"):
-        ticket_id = int(data.split("_")[2])
+    elif data.startswith("confirm_sendclient|"):
+        ticket_id = int(data.split("|")[1])
         send_to_client(ticket_id)
         query.edit_message_text("تم إرسال التذكرة إلى العميل.")
         return MAIN_MENU
-    elif data.startswith("cancel_sendclient_"):
-        ticket_id = int(data.split("_")[2])
+    elif data.startswith("cancel_sendclient|"):
+        ticket_id = int(data.split("|")[1])
         query.edit_message_text("تم إلغاء الإرسال إلى العميل.")
         return MAIN_MENU
-    elif data.startswith("sendto_da_"):
-        ticket_id = int(data.split("_")[1])
-        # Show confirmation before sending to DA.
-        keyboard = [[InlineKeyboardButton("نعم", callback_data=f"confirm_sendto_da_{ticket_id}"),
-                     InlineKeyboardButton("لا", callback_data=f"cancel_sendto_da_{ticket_id}")]]
+    elif data.startswith("sendto_da|"):
+        ticket_id = int(data.split("|")[1])
+        keyboard = [[InlineKeyboardButton("نعم", callback_data=f"confirm_sendto_da|{ticket_id}"),
+                     InlineKeyboardButton("لا", callback_data=f"cancel_sendto_da|{ticket_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         query.edit_message_text("هل أنت متأكد من إرسال الحل إلى الوكيل؟", reply_markup=reply_markup)
         return MAIN_MENU
-    elif data.startswith("confirm_sendto_da_"):
-        ticket_id = int(data.split("_")[2])
+    elif data.startswith("confirm_sendto_da|"):
+        ticket_id = int(data.split("|")[1])
         ticket = db.get_ticket(ticket_id)
         client_solution = None
         if ticket["logs"]:
@@ -153,8 +150,8 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
         notify_da(ticket_id, client_solution, info_request=False)
         query.edit_message_text("تم إرسال التذكرة إلى الوكيل.")
         return MAIN_MENU
-    elif data.startswith("cancel_sendto_da_"):
-        ticket_id = int(data.split("_")[2])
+    elif data.startswith("cancel_sendto_da|"):
+        ticket_id = int(data.split("|")[1])
         query.edit_message_text("تم إلغاء إرسال التذكرة إلى الوكيل.")
         return MAIN_MENU
     else:
@@ -171,7 +168,7 @@ def search_tickets(update: Update, context: CallbackContext):
                     f"العميل: {ticket['client']}\n"
                     f"الوصف: {ticket['issue_description']}\n"
                     f"الحالة: {ticket['status']}")
-            keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view_{ticket['ticket_id']}")]]
+            keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view|{ticket['ticket_id']}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
     else:
@@ -214,14 +211,14 @@ def notify_da(ticket_id, message, info_request=False):
                 f"الوصف: {ticket['issue_description']}\n"
                 f"الحالة: {ticket['status']}\n"
                 f"المعلومات المطلوبة: {message}")
-        keyboard = [[InlineKeyboardButton("تطبيق المعلومات الإضافية", callback_data=f"da_moreinfo_{ticket_id}")]]
+        keyboard = [[InlineKeyboardButton("تطبيق المعلومات الإضافية", callback_data=f"da_moreinfo|{ticket_id}")]]
     else:
         text = (f"<b>حل للمشكلة للتذكرة #{ticket_id}</b>\n"
                 f"رقم الطلب: {ticket['order_id']}\n"
                 f"الوصف: {ticket['issue_description']}\n"
                 f"الحالة: {ticket['status']}\n"
                 f"الحل: {message}")
-        keyboard = [[InlineKeyboardButton("إغلاق التذكرة", callback_data=f"close_{ticket_id}")]]
+        keyboard = [[InlineKeyboardButton("إغلاق التذكرة", callback_data=f"close|{ticket_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
         da_sub = db.get_subscription(da_id, "DA")
@@ -241,12 +238,12 @@ def send_to_client(ticket_id):
                f"الوصف: {ticket['issue_description']}\n"
                f"الحالة: {ticket['status']}")
     keyboard = [
-        [InlineKeyboardButton("حالياً", callback_data=f"notify_pref_{ticket_id}_now")],
-        [InlineKeyboardButton("خلال 15 دقيقة", callback_data=f"notify_pref_{ticket_id}_15")],
-        [InlineKeyboardButton("خلال 10 دقائق", callback_data=f"notify_pref_{ticket_id}_10")]
+        [InlineKeyboardButton("حالياً", callback_data=f"notify_pref|{ticket['ticket_id']}|now")],
+        [InlineKeyboardButton("خلال 15 دقيقة", callback_data=f"notify_pref|{ticket['ticket_id']}|15")],
+        [InlineKeyboardButton("خلال 10 دقائق", callback_data=f"notify_pref|{ticket['ticket_id']}|10")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    for client in db.get_clients_by_name(client_name):
+    for client in clients:
         try:
             bot.send_message(chat_id=client['chat_id'], text=message, reply_markup=reply_markup, parse_mode="HTML")
         except Exception as e:
@@ -267,7 +264,7 @@ def main():
         states={
             SUBSCRIPTION_PHONE: [MessageHandler(Filters.text & ~Filters.command, subscription_phone)],
             MAIN_MENU: [CallbackQueryHandler(supervisor_main_menu_callback,
-                                             pattern="^(menu_show_all|menu_query_issue|view_|solve_|moreinfo_|sendclient_|setclient_|sendto_da_|confirm_sendclient_|cancel_sendclient_|confirm_sendto_da_|cancel_sendto_da_).*")],
+                                             pattern="^(menu_show_all|menu_query_issue|view\\|.*|solve\\|.*|moreinfo\\|.*|sendclient\\|.*|sendto_da\\|.*|confirm_sendclient\\|.*|cancel_sendclient\\|.*|confirm_sendto_da\\|.*|cancel_sendto_da\\|.*)")],
             SEARCH_TICKETS: [MessageHandler(Filters.text & ~Filters.command, search_tickets)],
             AWAITING_RESPONSE: [MessageHandler(Filters.text & ~Filters.command, awaiting_response_handler)]
         },
