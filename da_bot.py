@@ -4,12 +4,22 @@ import logging
 import datetime
 import unicodedata
 import urllib.parse
+from io import BytesIO
+import cloudinary
+import cloudinary.uploader
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, Bot
 from telegram.ext import (Updater, CommandHandler, MessageHandler, Filters,
                           CallbackQueryHandler, ConversationHandler, CallbackContext)
 import db
 import config
 import notifier  # For sending notifications to supervisors
+
+# Configure Cloudinary using credentials from config.py
+cloudinary.config( 
+    cloud_name = config.CLOUDINARY_CLOUD_NAME, 
+    api_key = config.CLOUDINARY_API_KEY, 
+    api_secret = config.CLOUDINARY_API_SECRET
+)
 
 # Set logging level to DEBUG for troubleshooting.
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -177,21 +187,6 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
         query.edit_message_text("الخيار غير معروف.")
         return MAIN_MENU
 
-### NEW: Handler for "da_moreinfo|" callbacks ###
-def da_moreinfo_callback_handler(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-    data = query.data
-    try:
-        ticket_id = int(data.split("|")[1])
-    except (IndexError, ValueError):
-        query.edit_message_text("خطأ في بيانات التذكرة.")
-        return MAIN_MENU
-    context.user_data['ticket_id'] = ticket_id
-    logger.debug("da_moreinfo_callback_handler: Stored ticket_id=%s", ticket_id)
-    prompt_da_for_more_info(ticket_id, query.message.chat.id, context)
-    return MORE_INFO_PROMPT
-
 def new_issue_order(update: Update, context: CallbackContext):
     order_id = update.message.text.strip()
     context.user_data['order_id'] = order_id
@@ -213,9 +208,24 @@ def new_issue_description(update: Update, context: CallbackContext):
 
 def wait_image(update: Update, context: CallbackContext):
     if update.message.photo:
-        photo_file = update.message.photo[-1].file_id
-        context.user_data['image'] = photo_file
-        return show_ticket_summary_for_edit(update.message, context)
+        try:
+            photo = update.message.photo[-1]
+            file = photo.get_file()
+            bio = BytesIO()
+            file.download(out=bio)
+            bio.seek(0)
+            result = cloudinary.uploader.upload(bio)
+            secure_url = result.get('secure_url')
+            if secure_url:
+                context.user_data['image'] = secure_url
+                return show_ticket_summary_for_edit(update.message, context)
+            else:
+                update.message.reply_text("فشل رفع الصورة. حاول مرة أخرى:")
+                return WAIT_IMAGE
+        except Exception as e:
+            logger.error(f"Error uploading image: {e}")
+            update.message.reply_text("حدث خطأ أثناء رفع الصورة. حاول مرة أخرى:")
+            return WAIT_IMAGE
     else:
         update.message.reply_text("لم يتم إرسال صورة صحيحة. أعد الإرسال:")
         return WAIT_IMAGE
