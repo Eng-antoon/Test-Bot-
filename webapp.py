@@ -148,6 +148,7 @@ TICKETS_TEMPLATE = COMMON_STYLE + """
     <th>سبب المشكلة</th>
     <th>نوع المشكلة</th>
     <th>Client</th>
+    <th>الصورة</th>
     <th>Status</th>
     <th>DA ID</th>
     <th>Created At</th>
@@ -161,6 +162,13 @@ TICKETS_TEMPLATE = COMMON_STYLE + """
     <td>{{ t['issue_reason'] }}</td>
     <td>{{ t['issue_type'] }}</td>
     <td>{{ t['client'] }}</td>
+    <td>
+      {% if t['image_url'] %}
+        <img src="{{ t['image_url'] }}" width="100">
+      {% else %}
+        لا توجد
+      {% endif %}
+    </td>
     <td>
       <span class="status-indicator status-{{ t['status'].lower() }}"></span>
       {{ t['status'] }}
@@ -255,6 +263,11 @@ ACTIVITY_TEMPLATE = COMMON_STYLE + """
 <title>Ticket Activity</title>
 <h1>Activity for Ticket #{{ ticket_id }}</h1>
 <div class="activity-container">
+  {% if image_url %}
+  <div>
+    <img src="{{ image_url }}" width="200">
+  </div>
+  {% endif %}
   {% for entry in logs.split('\n') %}
   <div class="log-entry">{{ entry }}</div>
   {% endfor %}
@@ -277,7 +290,8 @@ def ticket_activity(ticket_id):
     if not t:
         return "Ticket not found", 404
     logs = json.dumps(json.loads(t['logs']), ensure_ascii=False, indent=2)
-    return render_template_string(ACTIVITY_TEMPLATE, ticket_id=ticket_id, logs=logs)
+    image_url = t['image_url']
+    return render_template_string(ACTIVITY_TEMPLATE, ticket_id=ticket_id, logs=logs, image_url=image_url)
 
 @app.route("/subscriptions")
 def subscriptions():

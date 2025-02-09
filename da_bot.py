@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # da_bot.py
+
 import logging
 import datetime
 import unicodedata
@@ -21,17 +22,16 @@ cloudinary.config(
     api_secret = config.CLOUDINARY_API_SECRET
 )
 
-# Set logging level to DEBUG for troubleshooting.
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Conversation states (we now need 13 values)
+# Conversation states
 (SUBSCRIPTION_PHONE, MAIN_MENU, NEW_ISSUE_CLIENT, NEW_ISSUE_ORDER,
  NEW_ISSUE_DESCRIPTION, NEW_ISSUE_REASON, NEW_ISSUE_TYPE, ASK_IMAGE, WAIT_IMAGE,
  AWAITING_DA_RESPONSE, EDIT_PROMPT, EDIT_FIELD, MORE_INFO_PROMPT) = range(13)
 
-# Mapping of issue reasons to available types.
+# Local mapping for issue reasons to types
 ISSUE_OPTIONS = {
     "المخزن": ["تالف", "منتهي الصلاحية", "عجز في المخزون", "تحضير خاطئ"],
     "المورد": ["خطا بالمستندات", "رصيد غير موجود", "اوردر خاطئ", "اوردر بكميه اكبر",
@@ -41,51 +41,26 @@ ISSUE_OPTIONS = {
     "التسليم": ["وصول متاخر", "تالف", "عطل بالسياره"]
 }
 
-### NEW: Helper to Prompt DA for More Info ###
-def prompt_da_for_more_info(ticket_id: int, chat_id: int, context: CallbackContext):
-    """
-    Retrieves the ticket and sends an instructional message to the DA
-    asking for additional information. Uses ForceReply so that the DA’s reply
-    is attached to this prompt.
-    """
-    ticket = db.get_ticket(ticket_id)
-    if not ticket:
-        logger.error("prompt_da_for_more_info: Ticket %s not found", ticket_id)
-        context.bot.send_message(chat_id=chat_id, text="خطأ: التذكرة غير موجودة.")
-        return
-    text = (
-        f"<b>التذكرة #{ticket_id}</b>\n"
-        f"رقم الطلب: {ticket['order_id']}\n"
-        f"الوصف: {ticket['issue_description']}\n"
-        f"الحالة: {ticket['status']}\n\n"
-        "يرجى إدخال المعلومات الإضافية المطلوبة للتذكرة:"
-    )
-    logger.debug("prompt_da_for_more_info: Prompting DA in chat %s for ticket %s", chat_id, ticket_id)
-    context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=ForceReply(selective=True))
+def get_issue_types_for_reason(reason):
+    """Return the list of issue types for the given reason."""
+    return ISSUE_OPTIONS.get(reason, [])
 
-### Additional Info Notification Helper (unchanged) ###
-def notify_supervisors_da_moreinfo(ticket_id: int, additional_info: str):
-    ticket = db.get_ticket(ticket_id)
-    if not ticket:
-        logger.error("notify_supervisors_da_moreinfo: Ticket %s not found", ticket_id)
-        return
-    bot = Bot(token=config.SUPERVISOR_BOT_TOKEN)
-    text = (f"<b>معلومات إضافية من الوكيل للتذكرة #{ticket_id}</b>\n"
-            f"رقم الطلب: {ticket['order_id']}\n"
-            f"الوصف: {ticket['issue_description']}\n"
-            f"المعلومات الإضافية: {additional_info}\n"
-            f"الحالة: {ticket['status']}")
-    keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view|{ticket_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    logger.debug("notify_supervisors_da_moreinfo: Notifying supervisors for ticket %s", ticket_id)
-    for sup in db.get_supervisors():
-        try:
-            bot.send_message(chat_id=sup['chat_id'], text=text, reply_markup=reply_markup, parse_mode="HTML")
-            logger.debug("notify_supervisors_da_moreinfo: Notified supervisor %s", sup['chat_id'])
-        except Exception as e:
-            logger.error("notify_supervisors_da_moreinfo: Error notifying supervisor %s: %s", sup['chat_id'], e)
+# =============================================================================
+# Helper: safe_edit_message
+# =============================================================================
+def safe_edit_message(query, text, reply_markup=None, parse_mode="HTML"):
+    """
+    Safely edits a message. If the original message is a photo (has a caption),
+    edit its caption; otherwise, edit its text.
+    """
+    if query.message.caption:
+        return query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    else:
+        return query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
 
-### START, SUBSCRIPTION, NEW ISSUE FLOW (unchanged) ###
+# =============================================================================
+# DA Bot Handlers: Subscription & New Issue Submission Flow
+# =============================================================================
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
     sub = db.get_subscription(user.id, "DA")
@@ -93,8 +68,10 @@ def start(update: Update, context: CallbackContext):
         update.message.reply_text("أهلاً! يرجى إدخال رقم هاتفك للاشتراك (DA):")
         return SUBSCRIPTION_PHONE
     else:
-        keyboard = [[InlineKeyboardButton("إضافة مشكلة", callback_data="menu_add_issue"),
-                     InlineKeyboardButton("استعلام عن مشكلة", callback_data="menu_query_issue")]]
+        keyboard = [
+            [InlineKeyboardButton("إضافة مشكلة", callback_data="menu_add_issue"),
+             InlineKeyboardButton("استعلام عن مشكلة", callback_data="menu_query_issue")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         update.message.reply_text(f"مرحباً {user.first_name}", reply_markup=reply_markup)
         return MAIN_MENU
@@ -104,8 +81,10 @@ def subscription_phone(update: Update, context: CallbackContext):
     user = update.effective_user
     db.add_subscription(user.id, phone, 'DA', "DA", None,
                         user.username, user.first_name, user.last_name, update.effective_chat.id)
-    keyboard = [[InlineKeyboardButton("إضافة مشكلة", callback_data="menu_add_issue"),
-                 InlineKeyboardButton("استعلام عن مشكلة", callback_data="menu_query_issue")]]
+    keyboard = [
+        [InlineKeyboardButton("إضافة مشكلة", callback_data="menu_add_issue"),
+         InlineKeyboardButton("استعلام عن مشكلة", callback_data="menu_query_issue")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     update.message.reply_text("تم الاشتراك بنجاح كـ DA!", reply_markup=reply_markup)
     return MAIN_MENU
@@ -116,11 +95,13 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
     data = query.data
     logger.debug("da_main_menu_callback: Received data: %s", data)
     if data == "menu_add_issue":
-        keyboard = [[InlineKeyboardButton("بوبا", callback_data="client_option_بوبا"),
-                     InlineKeyboardButton("بتلكو", callback_data="client_option_بتلكو"),
-                     InlineKeyboardButton("بيبس", callback_data="client_option_بيبس")]]
+        keyboard = [
+            [InlineKeyboardButton("بوبا", callback_data="client_option_بوبا"),
+             InlineKeyboardButton("بتلكو", callback_data="client_option_بتلكو"),
+             InlineKeyboardButton("بيبس", callback_data="client_option_بيبس")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("اختر العميل:", reply_markup=reply_markup)
+        safe_edit_message(query, text="اختر العميل:", reply_markup=reply_markup)
         return NEW_ISSUE_CLIENT
     elif data == "menu_query_issue":
         user = query.from_user
@@ -149,42 +130,43 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
                         f"الحالة: {status_ar}{resolution}")
                 query.message.reply_text(text, parse_mode="HTML")
         else:
-            query.edit_message_text("لا توجد تذاكر.")
+            safe_edit_message(query, text="لا توجد تذاكر.")
         return MAIN_MENU
     elif data.startswith("client_option_"):
         client_selected = data.split("_", 2)[2]
         context.user_data['client'] = client_selected
-        query.edit_message_text(f"تم اختيار العميل: {client_selected}\nأدخل رقم الطلب (مثال: ANR-123):")
+        safe_edit_message(query, text=f"تم اختيار العميل: {client_selected}\nأدخل رقم الطلب (مثال: ANR-123):")
         return NEW_ISSUE_ORDER
     elif data.startswith("issue_reason_"):
         reason = data.split("_", 2)[2]
         context.user_data['issue_reason'] = reason
-        types = ISSUE_OPTIONS.get(reason, [])
+        types = get_issue_types_for_reason(reason)
         keyboard = [[InlineKeyboardButton(t, callback_data="issue_type_" + t)] for t in types]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("اختر نوع المشكلة:", reply_markup=reply_markup)
+        safe_edit_message(query, text="اختر نوع المشكلة:", reply_markup=reply_markup)
         return NEW_ISSUE_TYPE
     elif data.startswith("issue_type_"):
         issue_type = urllib.parse.unquote(data.split("_", 2)[2])
         context.user_data['issue_type'] = issue_type
-        keyboard = [[InlineKeyboardButton("نعم", callback_data="attach_yes"),
-                     InlineKeyboardButton("لا", callback_data="attach_no")]]
+        keyboard = [
+            [InlineKeyboardButton("نعم", callback_data="attach_yes"),
+             InlineKeyboardButton("لا", callback_data="attach_no")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("هل تريد إرفاق صورة للمشكلة؟", reply_markup=reply_markup)
+        safe_edit_message(query, text="هل تريد إرفاق صورة للمشكلة؟", reply_markup=reply_markup)
         return ASK_IMAGE
     elif data in ["attach_yes", "attach_no"]:
         if data == "attach_yes":
-            query.edit_message_text("يرجى إرسال الصورة:")
+            safe_edit_message(query, text="يرجى إرسال الصورة:")
             return WAIT_IMAGE
         else:
             return show_ticket_summary_for_edit(query, context)
     elif data.startswith("da_moreinfo|"):
-        # New branch: handle "da_moreinfo" callbacks in MAIN_MENU state.
         return da_moreinfo_callback_handler(update, context)
     elif data.startswith("edit_ticket_") or data.startswith("edit_field_"):
         return edit_ticket_prompt_callback(update, context)
     else:
-        query.edit_message_text("الخيار غير معروف.")
+        safe_edit_message(query, text="الخيار غير معروف.")
         return MAIN_MENU
 
 def new_issue_order(update: Update, context: CallbackContext):
@@ -245,8 +227,10 @@ def show_ticket_summary_for_edit(source, context: CallbackContext):
                f"العميل: {data.get('client','')}\n"
                f"الصورة: {data.get('image', 'لا توجد')}")
     text = "ملخص التذكرة المدخلة:\n" + summary + "\nهل تريد تعديل التذكرة قبل الإرسال؟"
-    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
-                                            InlineKeyboardButton("لا", callback_data="edit_ticket_no")]])
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
+         InlineKeyboardButton("لا", callback_data="edit_ticket_no")]
+    ])
     msg_func(text=text, reply_markup=reply_markup, **kwargs)
     return EDIT_PROMPT
 
@@ -266,16 +250,17 @@ def edit_ticket_prompt_callback(update: Update, context: CallbackContext):
              InlineKeyboardButton("الصورة", callback_data="edit_field_image")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("اختر الحقل الذي تريد تعديله:", reply_markup=reply_markup)
+        safe_edit_message(query, text="اختر الحقل الذي تريد تعديله:", reply_markup=reply_markup)
         return EDIT_FIELD
     else:
-        keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
-                     InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
+        keyboard = [
+            [InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
+             InlineKeyboardButton("لا", callback_data="edit_ticket_no")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("هل تريد تعديل التذكرة قبل الإرسال؟", reply_markup=reply_markup)
+        safe_edit_message(query, text="هل تريد تعديل التذكرة قبل الإرسال؟", reply_markup=reply_markup)
         return EDIT_PROMPT
 
-### Using index-based mapping for editing issue reason and issue type (unchanged) ###
 def edit_field_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
@@ -290,20 +275,19 @@ def edit_field_callback(update: Update, context: CallbackContext):
             keyboard_buttons.append([InlineKeyboardButton(option, callback_data="edit_field_issue_reason_idx_" + key)])
         context.user_data['edit_reason_map'] = mapping
         reply_markup = InlineKeyboardMarkup(keyboard_buttons)
-        query.edit_message_text("اختر سبب المشكلة الجديد:", reply_markup=reply_markup)
+        safe_edit_message(query, text="اختر سبب المشكلة الجديد:", reply_markup=reply_markup)
         return EDIT_FIELD
-
     if field.startswith("edit_field_issue_reason_idx_"):
         idx = field[len("edit_field_issue_reason_idx_"):]
         mapping = context.user_data.get('edit_reason_map', {})
         new_reason = mapping.get(idx)
         if not new_reason:
-            query.edit_message_text("خطأ في اختيار سبب المشكلة.")
+            safe_edit_message(query, text="خطأ في اختيار سبب المشكلة.")
             return EDIT_PROMPT
         context.user_data['issue_reason'] = new_reason
         log_entry = {"action": "edit_field", "field": "سبب المشكلة", "new_value": new_reason}
         context.user_data.setdefault('edit_log', []).append(log_entry)
-        types = ISSUE_OPTIONS.get(new_reason, [])
+        types = get_issue_types_for_reason(new_reason)
         if types:
             mapping2 = {}
             keyboard_buttons = []
@@ -313,17 +297,16 @@ def edit_field_callback(update: Update, context: CallbackContext):
                 keyboard_buttons.append([InlineKeyboardButton(opt, callback_data="edit_field_issue_type_idx_" + key)])
             context.user_data['edit_type_map'] = mapping2
             reply_markup = InlineKeyboardMarkup(keyboard_buttons)
-            query.edit_message_text(f"تم تعديل سبب المشكلة إلى: {new_reason}\nالآن اختر نوع المشكلة:", reply_markup=reply_markup)
+            safe_edit_message(query, text=f"تم تعديل سبب المشكلة إلى: {new_reason}\nالآن اختر نوع المشكلة:", reply_markup=reply_markup)
             return EDIT_FIELD
         else:
-            query.edit_message_text(f"تم تعديل سبب المشكلة إلى: {new_reason}\nولا توجد خيارات متاحة لنوع المشكلة لهذا السبب.")
+            safe_edit_message(query, text=f"تم تعديل سبب المشكلة إلى: {new_reason}\nولا توجد خيارات متاحة لنوع المشكلة لهذا السبب.")
             return EDIT_PROMPT
-
     if field == "edit_field_issue_type":
         current_reason = context.user_data.get('issue_reason', '')
-        types = ISSUE_OPTIONS.get(current_reason, [])
+        types = get_issue_types_for_reason(current_reason)
         if not types:
-            query.edit_message_text("لا توجد خيارات متاحة لنوع المشكلة.")
+            safe_edit_message(query, text="لا توجد خيارات متاحة لنوع المشكلة.")
             return EDIT_PROMPT
         mapping = {}
         keyboard_buttons = []
@@ -333,59 +316,61 @@ def edit_field_callback(update: Update, context: CallbackContext):
             keyboard_buttons.append([InlineKeyboardButton(option, callback_data="edit_field_issue_type_idx_" + key)])
         context.user_data['edit_type_map'] = mapping
         reply_markup = InlineKeyboardMarkup(keyboard_buttons)
-        query.edit_message_text("اختر نوع المشكلة الجديد:", reply_markup=reply_markup)
+        safe_edit_message(query, text="اختر نوع المشكلة الجديد:", reply_markup=reply_markup)
         return EDIT_FIELD
-
     if field in ["edit_field_order", "edit_field_description", "edit_field_image", "edit_field_client"]:
         context.user_data['edit_field'] = field
         if field == "edit_field_client":
-            keyboard = [[InlineKeyboardButton("بوبا", callback_data="edit_field_client_بوبا"),
-                         InlineKeyboardButton("بتلكو", callback_data="edit_field_client_بتلكو"),
-                         InlineKeyboardButton("بيبس", callback_data="edit_field_client_بيبس")]]
+            keyboard = [
+                [InlineKeyboardButton("بوبا", callback_data="edit_field_client_بوبا"),
+                 InlineKeyboardButton("بتلكو", callback_data="edit_field_client_بتلكو"),
+                 InlineKeyboardButton("بيبس", callback_data="edit_field_client_بيبس")]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            query.edit_message_text("اختر العميل الجديد:", reply_markup=reply_markup)
+            safe_edit_message(query, text="اختر العميل الجديد:", reply_markup=reply_markup)
             return EDIT_FIELD
         else:
             field_name = field.split('_')[-1]
-            query.edit_message_text(f"أدخل القيمة الجديدة لـ {field_name}:")
+            safe_edit_message(query, text=f"أدخل القيمة الجديدة لـ {field_name}:")
             return EDIT_FIELD
-
     if field.startswith("edit_field_issue_type_idx_"):
         idx = field[len("edit_field_issue_type_idx_"):]
         mapping = context.user_data.get('edit_type_map', {})
         new_type = mapping.get(idx)
         if not new_type:
-            query.edit_message_text("خطأ في اختيار نوع المشكلة.")
+            safe_edit_message(query, text="خطأ في اختيار نوع المشكلة.")
             return EDIT_PROMPT
         context.user_data['issue_type'] = new_type
         log_entry = {"action": "edit_field", "field": "نوع المشكلة", "new_value": new_type}
         context.user_data.setdefault('edit_log', []).append(log_entry)
-        query.edit_message_text(f"تم تعديل نوع المشكلة إلى: {new_type}")
-        keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
-                     InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
+        safe_edit_message(query, text=f"تم تعديل نوع المشكلة إلى: {new_type}")
+        keyboard = [
+            [InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
+             InlineKeyboardButton("لا", callback_data="edit_ticket_no")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.bot.send_message(chat_id=query.message.chat.id,
-                               text="هل تريد تعديل التذكرة مرة أخرى؟",
-                               reply_markup=reply_markup)
+        context.bot.send_message(chat_id=query.message.chat.id,
+                                 text="هل تريد تعديل التذكرة مرة أخرى؟",
+                                 reply_markup=reply_markup)
         return EDIT_PROMPT
-
     if field.startswith("edit_field_client_"):
         new_client = field[len("edit_field_client_"):].strip()
         context.user_data['client'] = new_client
         log_entry = {"action": "edit_field", "field": "العميل", "new_value": new_client}
         context.user_data.setdefault('edit_log', []).append(log_entry)
-        query.edit_message_text(f"تم تعديل العميل إلى: {new_client}")
-        keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
-                     InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
+        safe_edit_message(query, text=f"تم تعديل العميل إلى: {new_client}")
+        keyboard = [
+            [InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
+             InlineKeyboardButton("لا", callback_data="edit_ticket_no")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.bot.send_message(chat_id=query.message.chat.id,
-                               text="هل تريد تعديل التذكرة مرة أخرى؟",
-                               reply_markup=reply_markup)
+        context.bot.send_message(chat_id=query.message.chat.id,
+                                 text="هل تريد تعديل التذكرة مرة أخرى؟",
+                                 reply_markup=reply_markup)
         return EDIT_PROMPT
-
     field_name = field.split('_')[-1]
     context.user_data['edit_field'] = field
-    query.edit_message_text(f"أدخل القيمة الجديدة لـ {field_name}:")
+    safe_edit_message(query, text=f"أدخل القيمة الجديدة لـ {field_name}:")
     return EDIT_FIELD
 
 def edit_field_input_handler(update: Update, context: CallbackContext):
@@ -404,8 +389,10 @@ def edit_field_input_handler(update: Update, context: CallbackContext):
         log_entry = {"action": "edit_field", "field": field_name, "new_value": new_value}
         context.user_data.setdefault('edit_log', []).append(log_entry)
         update.message.reply_text(f"تم تعديل {field_name} إلى: {new_value}")
-        keyboard = [[InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
-                     InlineKeyboardButton("لا", callback_data="edit_ticket_no")]]
+        keyboard = [
+            [InlineKeyboardButton("نعم", callback_data="edit_ticket_yes"),
+             InlineKeyboardButton("لا", callback_data="edit_ticket_no")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         update.message.reply_text("هل تريد تعديل التذكرة مرة أخرى؟", reply_markup=reply_markup)
         return EDIT_PROMPT
@@ -437,6 +424,9 @@ def finalize_ticket_da(source, context, image_url):
     context.user_data.clear()
     return MAIN_MENU
 
+# =============================================================================
+# Additional Info & Close Issue Flows
+# =============================================================================
 def da_awaiting_response_handler(update: Update, context: CallbackContext):
     additional_info = update.message.text.strip()
     ticket_id = context.user_data.get('ticket_id')
@@ -459,7 +449,7 @@ def da_callback_handler(update: Update, context: CallbackContext):
     if data.startswith("close|"):
         ticket_id = int(data.split("|")[1])
         db.update_ticket_status(ticket_id, "Closed", {"action": "da_closed"})
-        query.edit_message_text("تم إغلاق التذكرة بنجاح.")
+        safe_edit_message(query, text="تم إغلاق التذكرة بنجاح.")
         bot_sup = Bot(token=config.SUPERVISOR_BOT_TOKEN)
         for sup in db.get_supervisors():
             try:
@@ -470,10 +460,9 @@ def da_callback_handler(update: Update, context: CallbackContext):
                 logger.error("da_callback_handler: Error notifying supervisor of closure for ticket %s: %s", ticket_id, e)
         return MAIN_MENU
     elif data.startswith("da_moreinfo|"):
-        # Instead of handling here, we delegate to the conversation handler.
         return da_moreinfo_callback_handler(update, context)
     else:
-        query.edit_message_text("الإجراء غير معروف.")
+        safe_edit_message(query, text="الإجراء غير معروف.")
         return MAIN_MENU
 
 def da_moreinfo_callback_handler(update: Update, context: CallbackContext):
@@ -483,16 +472,58 @@ def da_moreinfo_callback_handler(update: Update, context: CallbackContext):
     try:
         ticket_id = int(data.split("|")[1])
     except (IndexError, ValueError):
-        query.edit_message_text("خطأ في بيانات التذكرة.")
+        safe_edit_message(query, text="خطأ في بيانات التذكرة.")
         return MAIN_MENU
     context.user_data['ticket_id'] = ticket_id
     logger.debug("da_moreinfo_callback_handler: Stored ticket_id=%s", ticket_id)
     prompt_da_for_more_info(ticket_id, query.message.chat.id, context)
     return MORE_INFO_PROMPT
 
+def prompt_da_for_more_info(ticket_id: int, chat_id: int, context: CallbackContext):
+    ticket = db.get_ticket(ticket_id)
+    if not ticket:
+        logger.error("prompt_da_for_more_info: Ticket %s not found", ticket_id)
+        context.bot.send_message(chat_id=chat_id, text="خطأ: التذكرة غير موجودة.")
+        return
+    text = (
+        f"<b>التذكرة #{ticket_id}</b>\n"
+        f"رقم الطلب: {ticket['order_id']}\n"
+        f"الوصف: {ticket['issue_description']}\n"
+        f"الحالة: {ticket['status']}\n\n"
+        "يرجى إدخال المعلومات الإضافية المطلوبة للتذكرة:"
+    )
+    logger.debug("prompt_da_for_more_info: Prompting DA in chat %s for ticket %s", chat_id, ticket_id)
+    context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=ForceReply(selective=True))
+
+def notify_supervisors_da_moreinfo(ticket_id: int, additional_info: str):
+    ticket = db.get_ticket(ticket_id)
+    if not ticket:
+        logger.error("notify_supervisors_da_moreinfo: Ticket %s not found", ticket_id)
+        return
+    bot = Bot(token=config.SUPERVISOR_BOT_TOKEN)
+    text = (f"<b>معلومات إضافية من الوكيل للتذكرة #{ticket_id}</b>\n"
+            f"رقم الطلب: {ticket['order_id']}\n"
+            f"الوصف: {ticket['issue_description']}\n"
+            f"المعلومات الإضافية: {additional_info}\n"
+            f"الحالة: {ticket['status']}")
+    keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view|{ticket_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    logger.debug("notify_supervisors_da_moreinfo: Notifying supervisors for ticket %s", ticket_id)
+    for sup in db.get_supervisors():
+        try:
+            bot.send_message(chat_id=sup['chat_id'], text=text, reply_markup=reply_markup, parse_mode="HTML")
+            logger.debug("notify_supervisors_da_moreinfo: Notified supervisor %s", sup['chat_id'])
+        except Exception as e:
+            logger.error("notify_supervisors_da_moreinfo: Error notifying supervisor %s: %s", sup['chat_id'], e)
+
+# =============================================================================
+# Default Handlers
+# =============================================================================
 def default_handler_da(update: Update, context: CallbackContext):
-    keyboard = [[InlineKeyboardButton("إضافة مشكلة", callback_data="menu_add_issue"),
-                 InlineKeyboardButton("استعلام عن مشكلة", callback_data="menu_query_issue")]]
+    keyboard = [
+        [InlineKeyboardButton("إضافة مشكلة", callback_data="menu_add_issue"),
+         InlineKeyboardButton("استعلام عن مشكلة", callback_data="menu_query_issue")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     update.message.reply_text("الرجاء اختيار خيار:", reply_markup=reply_markup)
     return MAIN_MENU
@@ -501,6 +532,9 @@ def default_handler_da_edit(update: Update, context: CallbackContext):
     update.message.reply_text("الرجاء إدخال القيمة المطلوبة أو اختر من الخيارات المتاحة.")
     return EDIT_FIELD
 
+# =============================================================================
+# Main function
+# =============================================================================
 def main():
     updater = Updater(config.DA_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
@@ -508,7 +542,6 @@ def main():
         entry_points=[CommandHandler('start', start)],
         states={
             SUBSCRIPTION_PHONE: [MessageHandler(Filters.text & ~Filters.command, subscription_phone)],
-            # In MAIN_MENU, we add an extra MessageHandler to catch any stray text messages and show the main menu.
             MAIN_MENU: [
                 CallbackQueryHandler(da_main_menu_callback,
                                      pattern="^(menu_add_issue|menu_query_issue|client_option_.*|issue_reason_.*|issue_type_.*|attach_.*|edit_ticket_.*|edit_field_.*|da_moreinfo\\|.*)"),

@@ -22,13 +22,18 @@ def notify_supervisors(ticket):
         ]
         markup = InlineKeyboardMarkup(buttons)
         try:
-            supervisor_bot.send_message(chat_id=sup["chat_id"], text=message, reply_markup=markup)
+            if ticket['image_url']:
+                supervisor_bot.send_photo(chat_id=sup["chat_id"], photo=ticket['image_url'],
+                                            caption=message, reply_markup=markup, parse_mode="HTML")
+            else:
+                supervisor_bot.send_message(chat_id=sup["chat_id"], text=message,
+                                              reply_markup=markup, parse_mode="HTML")
         except Exception as e:
             print("Error notifying supervisor:", e)
 
 def notify_client(ticket):
     clients = db.get_users_by_role("client", client=ticket["client"])
-    for client_user in clients:
+    for client in clients:
         message = (
             f"تم رفع بلاغ يتعلق بطلب {ticket['order_id']}.\n"
             f"الوصف: {ticket['issue_description']}\n"
@@ -39,7 +44,12 @@ def notify_client(ticket):
         ]
         markup = InlineKeyboardMarkup(buttons)
         try:
-            client_bot.send_message(chat_id=client_user["chat_id"], text=message, reply_markup=markup)
+            if ticket['image_url']:
+                client_bot.send_photo(chat_id=client["chat_id"], photo=ticket['image_url'],
+                                        caption=message, reply_markup=markup, parse_mode="HTML")
+            else:
+                client_bot.send_message(chat_id=client["chat_id"], text=message,
+                                        reply_markup=markup, parse_mode="HTML")
         except Exception as e:
             print("Error notifying client:", e)
 
@@ -57,6 +67,11 @@ def notify_da(ticket):
         ]
         markup = InlineKeyboardMarkup(buttons)
         try:
-            da_bot.send_message(chat_id=da_user["chat_id"], text=message, reply_markup=markup)
+            if ticket['image_url']:
+                da_bot.send_photo(chat_id=da_user["chat_id"], photo=ticket['image_url'],
+                                  caption=message, reply_markup=markup, parse_mode="HTML")
+            else:
+                da_bot.send_message(chat_id=da_user["chat_id"], text=message,
+                                    reply_markup=markup, parse_mode="HTML")
         except Exception as e:
             print("Error notifying DA:", e)

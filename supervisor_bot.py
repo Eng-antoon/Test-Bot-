@@ -10,7 +10,19 @@ import config
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Conversation states
 (SUBSCRIPTION_PHONE, MAIN_MENU, SEARCH_TICKETS, AWAITING_RESPONSE) = range(4)
+
+def safe_edit_message(query, text, reply_markup=None, parse_mode="HTML"):
+    """
+    Helper function that edits a message.
+    If the original message is a photo message (i.e. has a caption),
+    it uses edit_message_caption() instead of edit_message_text().
+    """
+    if query.message.caption:
+        return query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    else:
+        return query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
@@ -51,12 +63,15 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
                         f"الحالة: {ticket['status']}")
                 keyboard = [[InlineKeyboardButton("عرض التفاصيل", callback_data=f"view|{ticket['ticket_id']}")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                query.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+                # If the ticket has an image, send it as a photo message
+                if ticket['image_url']:
+                    query.message.reply_photo(photo=ticket['image_url'])
+                safe_edit_message(query, text=text, reply_markup=reply_markup, parse_mode="HTML")
         else:
-            query.edit_message_text("لا توجد تذاكر مفتوحة حالياً.")
+            safe_edit_message(query, text="لا توجد تذاكر مفتوحة حالياً.")
         return MAIN_MENU
     elif data == "menu_query_issue":
-        query.edit_message_text("أدخل رقم الطلب:")
+        safe_edit_message(query, text="أدخل رقم الطلب:")
         return SEARCH_TICKETS
     elif data.startswith("view|"):
         ticket_id = int(data.split("|")[1])
@@ -86,9 +101,10 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
             if ticket["status"] == "Client Responded":
                 keyboard.insert(0, [InlineKeyboardButton("إرسال للحالة إلى الوكيل", callback_data=f"sendto_da|{ticket_id}")])
             reply_markup = InlineKeyboardMarkup(keyboard)
-            query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+            # If the original message was a photo message, edit its caption; otherwise, edit its text.
+            safe_edit_message(query, text=text, reply_markup=reply_markup, parse_mode="HTML")
         else:
-            query.edit_message_text("التذكرة غير موجودة.")
+            safe_edit_message(query, text="التذكرة غير موجودة.")
         return MAIN_MENU
     elif data.startswith("solve|"):
         ticket_id = int(data.split("|")[1])
@@ -113,23 +129,23 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
         keyboard = [[InlineKeyboardButton("نعم", callback_data=f"confirm_sendclient|{ticket_id}"),
                      InlineKeyboardButton("لا", callback_data=f"cancel_sendclient|{ticket_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("هل أنت متأكد من إرسال التذكرة إلى العميل؟", reply_markup=reply_markup)
+        safe_edit_message(query, text="هل أنت متأكد من إرسال التذكرة إلى العميل؟", reply_markup=reply_markup)
         return MAIN_MENU
     elif data.startswith("confirm_sendclient|"):
         ticket_id = int(data.split("|")[1])
         send_to_client(ticket_id)
-        query.edit_message_text("تم إرسال التذكرة إلى العميل.")
+        safe_edit_message(query, text="تم إرسال التذكرة إلى العميل.")
         return MAIN_MENU
     elif data.startswith("cancel_sendclient|"):
         ticket_id = int(data.split("|")[1])
-        query.edit_message_text("تم إلغاء الإرسال إلى العميل.")
+        safe_edit_message(query, text="تم إلغاء الإرسال إلى العميل.")
         return MAIN_MENU
     elif data.startswith("sendto_da|"):
         ticket_id = int(data.split("|")[1])
         keyboard = [[InlineKeyboardButton("نعم", callback_data=f"confirm_sendto_da|{ticket_id}"),
                      InlineKeyboardButton("لا", callback_data=f"cancel_sendto_da|{ticket_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("هل أنت متأكد من إرسال الحل إلى الوكيل؟", reply_markup=reply_markup)
+        safe_edit_message(query, text="هل أنت متأكد من إرسال الحل إلى الوكيل؟", reply_markup=reply_markup)
         return MAIN_MENU
     elif data.startswith("confirm_sendto_da|"):
         ticket_id = int(data.split("|")[1])
@@ -148,14 +164,14 @@ def supervisor_main_menu_callback(update: Update, context: CallbackContext):
             client_solution = "لا يوجد حل من العميل."
         db.update_ticket_status(ticket_id, "Pending DA Action", {"action": "supervisor_forward", "message": client_solution})
         notify_da(ticket_id, client_solution, info_request=False)
-        query.edit_message_text("تم إرسال التذكرة إلى الوكيل.")
+        safe_edit_message(query, text="تم إرسال التذكرة إلى الوكيل.")
         return MAIN_MENU
     elif data.startswith("cancel_sendto_da|"):
         ticket_id = int(data.split("|")[1])
-        query.edit_message_text("تم إلغاء إرسال التذكرة إلى الوكيل.")
+        safe_edit_message(query, text="تم إلغاء إرسال التذكرة إلى الوكيل.")
         return MAIN_MENU
     else:
-        query.edit_message_text("الإجراء غير معروف.")
+        safe_edit_message(query, text="الإجراء غير معروف.")
         return MAIN_MENU
 
 def search_tickets(update: Update, context: CallbackContext):
@@ -223,7 +239,12 @@ def notify_da(ticket_id, message, info_request=False):
     try:
         da_sub = db.get_subscription(da_id, "DA")
         if da_sub:
-            bot.send_message(chat_id=da_sub['chat_id'], text=text, reply_markup=reply_markup, parse_mode="HTML")
+            if ticket['image_url']:
+                bot.send_photo(chat_id=da_sub['chat_id'], photo=ticket['image_url'],
+                               caption=text, reply_markup=reply_markup, parse_mode="HTML")
+            else:
+                bot.send_message(chat_id=da_sub['chat_id'], text=text,
+                                 reply_markup=reply_markup, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error notifying DA: {e}")
 
@@ -245,7 +266,12 @@ def send_to_client(ticket_id):
     reply_markup = InlineKeyboardMarkup(keyboard)
     for client in clients:
         try:
-            bot.send_message(chat_id=client['chat_id'], text=message, reply_markup=reply_markup, parse_mode="HTML")
+            if ticket['image_url']:
+                bot.send_photo(chat_id=client['chat_id'], photo=ticket['image_url'],
+                               caption=message, reply_markup=reply_markup, parse_mode="HTML")
+            else:
+                bot.send_message(chat_id=client['chat_id'], text=message,
+                                 reply_markup=reply_markup, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error notifying client {client['chat_id']}: {e}")
 

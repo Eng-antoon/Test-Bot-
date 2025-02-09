@@ -12,6 +12,17 @@ logger = logging.getLogger(__name__)
 # Conversation states
 (SUBSCRIPTION_PHONE, SUBSCRIPTION_CLIENT, MAIN_MENU, AWAITING_RESPONSE) = range(4)
 
+def safe_edit_message(query, text, reply_markup=None, parse_mode="HTML"):
+    """
+    Helper function that safely edits a message.
+    If the original message is a photo message (has a caption),
+    it uses edit_message_caption() instead of edit_message_text().
+    """
+    if query.message.caption:
+        return query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    else:
+        return query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
     sub = db.get_subscription(user.id, "Client")
@@ -38,7 +49,6 @@ def subscription_phone(update: Update, context: CallbackContext):
 def subscription_client(update: Update, context: CallbackContext):
     client_name = update.message.text.strip()
     user = update.effective_user
-    # Retrieve the subscription so we can preserve the phone number previously entered.
     sub = db.get_subscription(user.id, 'Client')
     phone = sub['phone'] if sub and sub['phone'] != "unknown" else "unknown"
     db.add_subscription(user.id, phone, 'Client', "Client", client_name,
@@ -55,8 +65,7 @@ def client_main_menu_callback(update: Update, context: CallbackContext):
     if data == "menu_show_tickets":
         sub = db.get_subscription(query.from_user.id, "Client")
         client_name = sub['client']
-        tickets = [t for t in db.get_all_open_tickets() 
-                   if t['status'] == "Awaiting Client Response" and t['client'] == client_name]
+        tickets = [t for t in db.get_all_open_tickets() if t['status'] == "Awaiting Client Response" and t['client'] == client_name]
         if tickets:
             for ticket in tickets:
                 text = (f"<b>تذكرة #{ticket['ticket_id']}</b>\n"
@@ -71,9 +80,11 @@ def client_main_menu_callback(update: Update, context: CallbackContext):
                     [InlineKeyboardButton("تجاهل", callback_data=f"ignore|{ticket['ticket_id']}")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                query.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+                if ticket['image_url']:
+                    query.message.reply_photo(photo=ticket['image_url'])
+                safe_edit_message(query, text=text, reply_markup=reply_markup, parse_mode="HTML")
         else:
-            query.edit_message_text("لا توجد تذاكر في انتظار ردك.")
+            safe_edit_message(query, text="لا توجد تذاكر في انتظار ردك.")
         return MAIN_MENU
     elif data.startswith("notify_pref|"):
         parts = data.split("|")
@@ -91,7 +102,7 @@ def client_main_menu_callback(update: Update, context: CallbackContext):
         ticket_id = int(data.split("|")[1])
         ticket = db.get_ticket(ticket_id)
         if ticket['status'] in ("Client Responded", "Client Ignored", "Closed"):
-            query.edit_message_text("التذكرة مغلقة أو تمت معالجتها بالفعل ولا يمكن تعديلها.")
+            safe_edit_message(query, text="التذكرة مغلقة أو تمت معالجتها بالفعل ولا يمكن تعديلها.")
             return MAIN_MENU
         context.user_data['ticket_id'] = ticket_id
         context.user_data['awaiting_response'] = True
@@ -103,15 +114,15 @@ def client_main_menu_callback(update: Update, context: CallbackContext):
         ticket_id = int(data.split("|")[1])
         ticket = db.get_ticket(ticket_id)
         if ticket['status'] in ("Client Responded", "Client Ignored", "Closed"):
-            query.edit_message_text("التذكرة مغلقة أو تمت معالجتها بالفعل ولا يمكن تعديلها.")
+            safe_edit_message(query, text="التذكرة مغلقة أو تمت معالجتها بالفعل ولا يمكن تعديلها.")
             return MAIN_MENU
         db.update_ticket_status(ticket_id, "Client Ignored", {"action": "client_ignored"})
         db.update_ticket_status(ticket_id, "Client Responded", {"action": "client_final_response", "message": "ignored"})
         notify_supervisors_client_response(ticket_id, ignored=True)
-        query.edit_message_text("تم إرسال ردك (تم تجاهل التذكرة).")
+        safe_edit_message(query, text="تم إرسال ردك (تم تجاهل التذكرة).")
         return MAIN_MENU
     else:
-        query.edit_message_text("الإجراء غير معروف.")
+        safe_edit_message(query, text="الإجراء غير معروف.")
         return MAIN_MENU
 
 def send_issue_details_to_client(query, ticket_id):
@@ -128,7 +139,9 @@ def send_issue_details_to_client(query, ticket_id):
         [InlineKeyboardButton("تجاهل", callback_data=f"ignore|{ticket_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+    if ticket['image_url']:
+        query.bot.send_photo(chat_id=query.message.chat_id, photo=ticket['image_url'])
+    safe_edit_message(query, text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 def send_full_issue_details_to_client(query, ticket_id):
     ticket = db.get_ticket(ticket_id)
@@ -141,7 +154,9 @@ def send_full_issue_details_to_client(query, ticket_id):
         [InlineKeyboardButton("تجاهل", callback_data=f"ignore|{ticket_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="HTML")
+    if ticket['image_url']:
+        query.bot.send_photo(chat_id=query.message.chat_id, photo=ticket['image_url'])
+    safe_edit_message(query, text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 def reminder_callback(context: CallbackContext):
     job = context.job
@@ -183,7 +198,12 @@ def notify_supervisors_client_response(ticket_id, solution=None, ignored=False):
     reply_markup = InlineKeyboardMarkup(keyboard)
     for sup in db.get_supervisors():
         try:
-            bot.send_message(chat_id=sup['chat_id'], text=text, reply_markup=reply_markup, parse_mode="HTML")
+            if ticket['image_url']:
+                bot.send_photo(chat_id=sup['chat_id'], photo=ticket['image_url'],
+                               caption=text, reply_markup=reply_markup, parse_mode="HTML")
+            else:
+                bot.send_message(chat_id=sup['chat_id'], text=text,
+                                 reply_markup=reply_markup, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error notifying supervisor {sup['chat_id']}: {e}")
 
