@@ -5,6 +5,7 @@ import logging
 import datetime
 import unicodedata
 import urllib.parse
+import requests  # <-- Added to perform HTTP requests to the API endpoint
 from io import BytesIO
 import cloudinary
 import cloudinary.uploader
@@ -26,12 +27,20 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
                     level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# =============================================================================
 # Conversation states
-(SUBSCRIPTION_PHONE, MAIN_MENU, NEW_ISSUE_CLIENT, NEW_ISSUE_ORDER,
- NEW_ISSUE_DESCRIPTION, NEW_ISSUE_REASON, NEW_ISSUE_TYPE, ASK_IMAGE, WAIT_IMAGE,
- AWAITING_DA_RESPONSE, EDIT_PROMPT, EDIT_FIELD, MORE_INFO_PROMPT) = range(13)
+# 
+# Note: We have removed the old NEW_ISSUE_CLIENT state.
+# Now the order (and its associated client) is selected automatically
+# via the API and shown in state NEW_ISSUE_ORDER.
+# =============================================================================
+(SUBSCRIPTION_PHONE, MAIN_MENU, NEW_ISSUE_ORDER, NEW_ISSUE_DESCRIPTION,
+ NEW_ISSUE_REASON, NEW_ISSUE_TYPE, ASK_IMAGE, WAIT_IMAGE,
+ AWAITING_DA_RESPONSE, EDIT_PROMPT, EDIT_FIELD, MORE_INFO_PROMPT) = range(12)
 
+# =============================================================================
 # Local mapping for issue reasons to types
+# =============================================================================
 ISSUE_OPTIONS = {
     "المخزن": ["تالف", "منتهي الصلاحية", "عجز في المخزون", "تحضير خاطئ"],
     "المورد": ["خطا بالمستندات", "رصيد غير موجود", "اوردر خاطئ", "اوردر بكميه اكبر",
@@ -89,20 +98,55 @@ def subscription_phone(update: Update, context: CallbackContext):
     update.message.reply_text("تم الاشتراك بنجاح كـ DA!", reply_markup=reply_markup)
     return MAIN_MENU
 
+# =============================================================================
+# New function: fetch_orders
+#
+# This function uses the agent's (DA's) phone number from their subscription
+# and today’s date to call your external endpoint. It then parses the returned
+# JSON and builds a set of inline buttons. Each button’s callback data includes
+# the order_id and the client_name.
+# =============================================================================
+def fetch_orders(query, context):
+    user = query.from_user
+    sub = db.get_subscription(user.id, "DA")
+    if not sub or not sub['phone']:
+        safe_edit_message(query, text="لم يتم العثور على بيانات الاشتراك أو رقم الهاتف.")
+        return MAIN_MENU
+    agent_phone = sub['phone']
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    url = f"https://3e5440qr0c.execute-api.eu-west-3.amazonaws.com/dev/locus_info?agent_phone={agent_phone}&order_date='2024-11-05'"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        orders_data = response.json()
+        orders = orders_data.get("data", [])
+        if not orders:
+            safe_edit_message(query, text="لا توجد طلبات اليوم.")
+            return MAIN_MENU
+        keyboard = []
+        for order in orders:
+            order_id = order.get("order_id")
+            client_name = order.get("client_name")
+            # Build a callback data string that our handler will later parse
+            callback_data = f"select_order|{order_id}|{client_name}"
+            button_text = f"طلب {order_id} - {client_name}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        safe_edit_message(query, text="اختر الطلب الذي تريد رفع مشكلة عنه:", reply_markup=reply_markup)
+        return NEW_ISSUE_ORDER
+    except Exception as e:
+        safe_edit_message(query, text=f"حدث خطأ أثناء جلب الطلبات: {e}")
+        return MAIN_MENU
+
 def da_main_menu_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
     data = query.data
     logger.debug("da_main_menu_callback: Received data: %s", data)
     if data == "menu_add_issue":
-        keyboard = [
-            [InlineKeyboardButton("بوبا", callback_data="client_option_بوبا"),
-             InlineKeyboardButton("بتلكو", callback_data="client_option_بتلكو"),
-             InlineKeyboardButton("بيبس", callback_data="client_option_بيبس")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        safe_edit_message(query, text="اختر العميل:", reply_markup=reply_markup)
-        return NEW_ISSUE_CLIENT
+        # Instead of asking the agent to choose a client and enter an order number manually,
+        # we now fetch the orders dynamically from the external API.
+        return fetch_orders(query, context)
     elif data == "menu_query_issue":
         user = query.from_user
         tickets = [t for t in db.get_all_tickets() if t['da_id'] == user.id]
@@ -132,11 +176,18 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
         else:
             safe_edit_message(query, text="لا توجد تذاكر.")
         return MAIN_MENU
-    elif data.startswith("client_option_"):
-        client_selected = data.split("_", 2)[2]
-        context.user_data['client'] = client_selected
-        safe_edit_message(query, text=f"تم اختيار العميل: {client_selected}\nأدخل رقم الطلب (مثال: ANR-123):")
-        return NEW_ISSUE_ORDER
+    # ---- New branch to handle the order selection from the API ----
+    elif data.startswith("select_order|"):
+        parts = data.split("|")
+        if len(parts) < 3:
+            safe_edit_message(query, text="بيانات الطلب غير صحيحة.")
+            return MAIN_MENU
+        order_id = parts[1]
+        client_name = parts[2]
+        context.user_data['order_id'] = order_id
+        context.user_data['client'] = client_name
+        safe_edit_message(query, text=f"تم اختيار الطلب رقم {order_id} للعميل {client_name}.\nالآن، صف المشكلة التي تواجهها:")
+        return NEW_ISSUE_DESCRIPTION
     elif data.startswith("issue_reason_"):
         reason = data.split("_", 2)[2]
         context.user_data['issue_reason'] = reason
@@ -168,12 +219,6 @@ def da_main_menu_callback(update: Update, context: CallbackContext):
     else:
         safe_edit_message(query, text="الخيار غير معروف.")
         return MAIN_MENU
-
-def new_issue_order(update: Update, context: CallbackContext):
-    order_id = update.message.text.strip()
-    context.user_data['order_id'] = order_id
-    update.message.reply_text("صف المشكلة التي تواجهها:")
-    return NEW_ISSUE_DESCRIPTION
 
 def new_issue_description(update: Update, context: CallbackContext):
     description = update.message.text.strip()
@@ -544,11 +589,10 @@ def main():
             SUBSCRIPTION_PHONE: [MessageHandler(Filters.text & ~Filters.command, subscription_phone)],
             MAIN_MENU: [
                 CallbackQueryHandler(da_main_menu_callback,
-                                     pattern="^(menu_add_issue|menu_query_issue|client_option_.*|issue_reason_.*|issue_type_.*|attach_.*|edit_ticket_.*|edit_field_.*|da_moreinfo\\|.*)"),
+                                     pattern="^(menu_add_issue|menu_query_issue|issue_reason_.*|issue_type_.*|attach_.*|edit_ticket_.*|edit_field_.*|da_moreinfo\\|.*)"),
                 MessageHandler(Filters.text & ~Filters.command, default_handler_da)
             ],
-            NEW_ISSUE_CLIENT: [CallbackQueryHandler(da_main_menu_callback, pattern="^client_option_.*")],
-            NEW_ISSUE_ORDER: [MessageHandler(Filters.text & ~Filters.command, new_issue_order)],
+            NEW_ISSUE_ORDER: [CallbackQueryHandler(da_main_menu_callback, pattern="^select_order\\|.*")],
             NEW_ISSUE_DESCRIPTION: [MessageHandler(Filters.text & ~Filters.command, new_issue_description)],
             NEW_ISSUE_REASON: [CallbackQueryHandler(da_main_menu_callback, pattern="^issue_reason_.*")],
             NEW_ISSUE_TYPE: [CallbackQueryHandler(da_main_menu_callback, pattern="^issue_type_.*")],
